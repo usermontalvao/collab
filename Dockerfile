@@ -4,7 +4,8 @@ WORKDIR /src
 COPY Jurius.CollabEditing.csproj ./
 RUN dotnet restore
 COPY . ./
-RUN dotnet publish -c Release -o /app --no-restore
+# Projeto explícito: a pasta tests/ também tem um .csproj.
+RUN dotnet publish Jurius.CollabEditing.csproj -c Release -o /app --no-restore
 
 # Runtime
 FROM mcr.microsoft.com/dotnet/aspnet:8.0

@@ -37,14 +37,22 @@ No túnel da Cloudflare, adicione a rota:
 O `cloudflared` já encaminha WebSocket — não precisa de configuração extra. A
 própria página inicial confirma isso (veja abaixo).
 
-Depois, no `.env` do CRM:
+Depois, no `.env` do CRM **e nas variáveis de ambiente do build de produção**
+(Netlify/Render — o Vite grava o valor no bundle na hora do build):
 
 ```
 VITE_SYNCFUSION_COLLAB_URL=https://collab.jurius-api.com
 ```
 
-Sem essa variável, o CRM funciona exatamente como antes: abre o documento direto do
-Nextcloud, sem co-edição.
+**Sem essa variável não existe co-edição nenhuma**: o CRM abre o documento direto do
+Nextcloud e cada navegador fica com a sua própria cópia — duas pessoas no mesmo
+arquivo não veem o que a outra digita, e quem salvar por último sobrescreve o outro.
+Este era o estado de fato do ambiente: a variável não estava configurada.
+
+A versão do pacote npm `@syncfusion/ej2-documenteditor` no CRM tem de bater
+**exatamente** com `<SyncfusionVersion>` no `.csproj` daqui (hoje **32.1.21**). O
+`package.json` do CRM está pinado (sem `^`) justamente para não divergir sozinho: o
+formato SFDT e as operações mudam entre versões.
 
 ## Página inicial (`https://collab.jurius-api.com`)
 
@@ -108,8 +116,11 @@ Editor (navegador)                     Este serviço                 Nextcloud
    │  ◄──────────── SFDT + versão ──────────│                           │
    │                                        │
    │  digita ─► POST UpdateAction ─────────►│ versiona + transforma (OT)
-   │                                        │ guarda no Redis
+   │            (com Bearer do Supabase)    │ guarda no Redis
    │  ◄── SignalR "dataReceived" ───────────│ distribui para a sala
+   │                                        │
+   │  Salvar ─► POST SaveToSource ─────────►│ aplica tudo e grava ─────►│
+   │  ◄──────── "gravou N operações" ───────│                           │
    │                                        │
    │  (última pessoa sai) ─────────────────►│ aplica tudo e grava ─────►│
 ```
@@ -119,8 +130,61 @@ Editor (navegador)                     Este serviço                 Nextcloud
   em log ou painel.
 - O Redis guarda as operações ainda não gravadas (limite de 100; ao passar disso, as
   mais antigas vão para o arquivo em background).
+- **`SaveToSource`** é o botão Salvar do editor: grava agora e só responde depois da
+  confirmação do Nextcloud. É o que permite à tela dizer "Salvo" sem mentir.
 - Quando o último participante fecha o documento, o que estiver pendente é aplicado
   ao `.docx` e gravado no Nextcloud.
+
+### Autenticação das chamadas do Document Editor
+
+`UpdateAction` e `GetActionsFromServer` **não** são enviados pelo código do CRM: quem
+monta esses `XMLHttpRequest` é o `CollaborativeEditingHandler` da Syncfusion, e ele só
+acrescenta os cabeçalhos que estiverem em `documentEditor.headers`. Como este serviço
+exige token do Supabase em `/api/CollaborativeEditing/*`, o CRM injeta o `Authorization`
+no `setCustomAjaxHeaders` da instância do módulo (`SyncfusionEditor.tsx`).
+
+Sem isso o sintoma é traiçoeiro: o WebSocket conecta normalmente (o token dele vai por
+`?access_token=`), o painel mostra gente na sala — e **nenhuma letra atravessa**, porque
+toda operação volta 401. Pior: depois de uma recusa o handler da Syncfusion deixa de
+enviar qualquer operação seguinte até o fim da sessão. Os testes
+`UpdateActionExigeToken` e `SaveToSourceExigeToken` seguram esse comportamento.
+
+### Gravação: uma via só
+
+Gravação parcial (cache cheio), gravação final (sala vazia) e gravação sob demanda
+(botão Salvar) passam todas por `RoomPersistence`, com trava por sala:
+
+1. tira uma foto do que está pendente (versão + as duas filas);
+2. baixa o `.docx`, aplica exatamente essas operações e envia de volta;
+3. remove das filas **exatamente a quantidade aplicada**.
+
+O passo 3 por quantidade — e não apagando a chave, como fazia o exemplo oficial — é o
+que preserva o que foi digitado **durante** a gravação. E a trava por sala é o que
+impede duas gravações simultâneas de aplicarem a mesma operação duas vezes.
+
+Consequência disso: o deslocamento entre "versão da operação" e "índice na lista do
+Redis" deixou de ser `revisão × limite` e passou a ser um contador de operações já
+gravadas (`_op_offset`). A conta antiga só fechava quando o corte tinha exatamente o
+tamanho do limite; com o Salvar sob demanda o corte tem tamanho qualquer.
+
+> **Ao atualizar:** as chaves de sala mudaram de nome. Suba a versão nova com as salas
+> vazias (ninguém editando) ou limpe o Redis — `docker compose exec redis redis-cli
+> FLUSHDB`. Salas em andamento no formato antigo não são migradas.
+
+## Testes
+
+```bash
+dotnet test tests/Jurius.CollabEditing.Tests
+```
+
+Sobem o serviço inteiro (controllers + hub + fila) contra um `redis-server` de
+verdade, trocando só o Nextcloud por um dublê em memória — os `.docx` são reais.
+Sem `redis-server` na máquina os testes de integração são **pulados**, nunca
+"verdes". Para apontar um binário específico:
+
+```bash
+COLLAB_TEST_REDIS_SERVER=/caminho/para/redis-server dotnet test tests/Jurius.CollabEditing.Tests
+```
 
 ## Variáveis
 

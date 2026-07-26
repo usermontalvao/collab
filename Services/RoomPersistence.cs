@@ -1,4 +1,6 @@
+using Jurius.CollabEditing.Hubs;
 using Jurius.CollabEditing.Model;
+using Microsoft.AspNetCore.SignalR;
 using Newtonsoft.Json;
 using StackExchange.Redis;
 using Syncfusion.EJ2.DocumentEditor;
@@ -36,17 +38,20 @@ namespace Jurius.CollabEditing.Services
         private readonly IConnectionMultiplexer _redis;
         private readonly INextcloudStorage _storage;
         private readonly IActivityTracker _activity;
+        private readonly IHubContext<DocumentEditorHub> _hub;
         private readonly ILogger<RoomPersistence> _logger;
 
         public RoomPersistence(
             IConnectionMultiplexer redis,
             INextcloudStorage storage,
             IActivityTracker activity,
+            IHubContext<DocumentEditorHub> hub,
             ILogger<RoomPersistence> logger)
         {
             _redis = redis;
             _storage = storage;
             _activity = activity;
+            _hub = hub;
             _logger = logger;
         }
 
@@ -133,6 +138,7 @@ namespace Jurius.CollabEditing.Services
 
                 if (finalize) await ClearRoomAsync(database, roomName);
                 outcome.StillPending = 0;
+                await NotifyRoomSavedAsync(roomName, outcome, finalize, cancellationToken);
                 return outcome;
             }
 
@@ -174,7 +180,42 @@ namespace Jurius.CollabEditing.Services
                 "Sala {Room}: {Count} operações gravadas (versão {Version}, final {Final}, restaram {Pending}).",
                 roomName, actions.Count, version, finalize, outcome.StillPending);
 
+            await NotifyRoomSavedAsync(roomName, outcome, finalize, cancellationToken);
             return outcome;
+        }
+
+        /// <summary>
+        /// Avisa a sala INTEIRA que o documento acabou de ser gravado no Nextcloud.
+        /// É o que faz o "Alterações pendentes" do outro navegador virar "Salvo" na
+        /// hora em que UMA pessoa salva: sem este aviso, quem não clicou continuava
+        /// vendo pendência de um conteúdo que já estava gravado. Na gravação final
+        /// (última pessoa saindo) a sala está vazia e não há quem avisar.
+        /// </summary>
+        private async Task NotifyRoomSavedAsync(
+            string roomName,
+            SaveOutcome outcome,
+            bool finalize,
+            CancellationToken cancellationToken)
+        {
+            if (finalize) return;
+
+            try
+            {
+                await _hub.Clients.Group(roomName).SendAsync("dataReceived", "saved", new
+                {
+                    version = outcome.Version,
+                    operations = outcome.Operations,
+                    stillPending = outcome.StillPending,
+                    uploaded = outcome.Uploaded,
+                    savedAt = outcome.SavedAt,
+                }, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                // O documento JÁ está gravado; falhar o aviso não pode falhar a
+                // gravação. O outro navegador atualiza no próximo salvamento.
+                _logger.LogWarning(ex, "Sala {Room}: não foi possível avisar a sala da gravação.", roomName);
+            }
         }
 
         private async Task ApplyAndUploadAsync(

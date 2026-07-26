@@ -280,6 +280,52 @@ public class CoedicaoTests
         Assert.Contains("OlaZZ", texto);
     }
 
+    [SkippableFact(DisplayName = "Salvar avisa a sala inteira — quem não clicou também vê \"Salvo\"")]
+    public async Task SalvarAvisaASalaInteira()
+    {
+        using var servico = NovoServico();
+        var client = servico.CreateClient();
+        const string sala = "sala_aviso_salvo";
+
+        var versao = await AbrirDocumento(client, sala);
+
+        await using var ana = await servico.ConnectHubAsync();
+        await using var bruno = await servico.ConnectHubAsync();
+
+        var avisosParaAna = new List<System.Text.Json.JsonElement>();
+        var avisosParaBruno = new List<System.Text.Json.JsonElement>();
+        ana.On<string, System.Text.Json.JsonElement>("dataReceived", (tipo, dados) =>
+        {
+            if (tipo == "saved") lock (avisosParaAna) avisosParaAna.Add(dados);
+        });
+        bruno.On<string, System.Text.Json.JsonElement>("dataReceived", (tipo, dados) =>
+        {
+            if (tipo == "saved") lock (avisosParaBruno) avisosParaBruno.Add(dados);
+        });
+
+        await ana.InvokeAsync("JoinGroup", new RoomMemberInfo { RoomName = sala, CurrentUser = "Ana" });
+        await bruno.InvokeAsync("JoinGroup", new RoomMemberInfo { RoomName = sala, CurrentUser = "Bruno" });
+
+        await EnviarOperacao(client, DocumentFactory.Insert(sala, "conexao-da-ana", versao, "ZZ", offset: 4));
+
+        // Ana clica em Salvar; Bruno não fez nada.
+        var resultado = await Salvar(client, sala);
+        Assert.True(resultado.Uploaded);
+
+        Assert.True(
+            await Ate(() => { lock (avisosParaBruno) return avisosParaBruno.Count > 0; }),
+            "Bruno não foi avisado de que o documento foi gravado.");
+        Assert.True(
+            await Ate(() => { lock (avisosParaAna) return avisosParaAna.Count > 0; }),
+            "Quem salvou também deve receber o aviso (confirma a rodada completa).");
+
+        System.Text.Json.JsonElement aviso;
+        lock (avisosParaBruno) aviso = avisosParaBruno[0];
+        Assert.True(aviso.GetProperty("uploaded").GetBoolean());
+        Assert.Equal(0, aviso.GetProperty("stillPending").GetInt64());
+        Assert.Equal(1, aviso.GetProperty("operations").GetInt32());
+    }
+
     [SkippableFact(DisplayName = "Salvar sem nada pendente não inventa gravação")]
     public async Task SalvarSemPendenciaNaoGrava()
     {

@@ -33,11 +33,24 @@ namespace Jurius.CollabEditing.Services
             _http = http;
             _http.Timeout = TimeSpan.FromMinutes(3);
 
-            // Ex.: https://cloud.exemplo.com/remote.php/dav/files/usuario
-            _baseUrl = (config["Nextcloud:BaseUrl"] ?? string.Empty).TrimEnd('/');
             _user = config["Nextcloud:User"] ?? string.Empty;
-            _password = config["Nextcloud:Password"] ?? string.Empty;
+
+            // Aceita as duas grafias: o CRM (Edge Function nextcloud-proxy) já usa
+            // NEXTCLOUD_APP_PASSWORD, então dá para copiar o mesmo valor sem
+            // renomear nada.
+            _password = Primeiro(config["Nextcloud:Password"], config["Nextcloud:AppPassword"]);
+
+            // Aceita tanto a raiz do Nextcloud (https://nextcloud.exemplo.com)
+            // quanto a raiz WebDAV completa (.../remote.php/dav/files/usuario).
+            // O proxy do CRM guarda só a raiz — mesma coisa aqui.
+            var configured = Primeiro(config["Nextcloud:BaseUrl"], config["Nextcloud:Url"]).TrimEnd('/');
+            _baseUrl = configured.Length == 0 || configured.Contains("/remote.php/dav/", StringComparison.OrdinalIgnoreCase)
+                ? configured
+                : $"{configured}/remote.php/dav/files/{Uri.EscapeDataString(_user)}";
         }
+
+        private static string Primeiro(params string[] valores) =>
+            valores.FirstOrDefault(valor => !string.IsNullOrWhiteSpace(valor)) ?? string.Empty;
 
         public bool IsConfigured =>
             !string.IsNullOrWhiteSpace(_baseUrl) &&
@@ -48,7 +61,7 @@ namespace Jurius.CollabEditing.Services
         {
             if (IsConfigured) return;
             throw new InvalidOperationException(
-                "Nextcloud não configurado. Defina Nextcloud__BaseUrl, Nextcloud__User e Nextcloud__Password.");
+                "Nextcloud não configurado. Defina NEXTCLOUD_URL, NEXTCLOUD_USER e NEXTCLOUD_APP_PASSWORD.");
         }
 
         // O cabeçalho vai em cada requisição, não no HttpClient: a fábrica entrega

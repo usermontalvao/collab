@@ -192,10 +192,11 @@
       // dos casos e precisa aparecer em vermelho, não em verde.
       var authBroken = d.auth.required && !d.auth.supabaseConfigured;
       html += componentRow(
-        'Token exigido',
+        'Login do CRM exigido',
         d.auth.required && !authBroken,
-        authBroken ? 'exigido mas Supabase não configurado — tudo será recusado'
-                   : (d.auth.required ? 'sim (Supabase)' : 'NÃO — só para ambiente fechado'));
+        authBroken ? 'falta SUPABASE_URL / SUPABASE_ANON_KEY — nenhum documento vai abrir'
+                   : (d.auth.required ? 'sim — só quem está logado no CRM edita'
+                                      : 'NÃO — qualquer um edita; só para ambiente fechado'));
       $('components').innerHTML = html;
       return d;
     }).catch(function (err) {

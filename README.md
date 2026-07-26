@@ -75,7 +75,7 @@ documento e mostra na página inicial o que está faltando. O `docker logs` tamb
 imprime um resumo logo no start:
 
 ```
-Co-edição Jurius iniciando · Redis: redis:6379 · Nextcloud: BaseUrl FALTANDO, User FALTANDO … 
+Co-edição Jurius iniciando · Redis: redis:6379 · Nextcloud: Url FALTANDO, User FALTANDO … 
 ```
 
 **Variáveis não chegaram ao container?** É o tropeço mais comum:
@@ -88,14 +88,15 @@ Co-edição Jurius iniciando · Redis: redis:6379 · Nextcloud: BaseUrl FALTANDO
   Se aparecer `Supabase__Url: ""`, o `.env` não foi lido.
 - **Pelo Portainer (stack a partir do Git): o `.env` do repositório é ignorado.**
   As variáveis têm de ser cadastradas na aba *Environment variables* da stack —
-  com os mesmos nomes do `.env.example` (`SUPABASE_URL`, `NEXTCLOUD_BASE_URL`, …).
+  com os mesmos nomes do `.env.example` (`SUPABASE_URL`, `NEXTCLOUD_URL`, …).
 
 **Nextcloud recusando a credencial?** A página inicial diz "credencial recusada"
 quando volta 401/403. Use uma *senha de app* do Nextcloud (Configurações →
-Segurança), não a senha da conta, e confira se a `BaseUrl` termina no usuário:
-`https://…/remote.php/dav/files/USUARIO`.
+Segurança), não a senha da conta. O `NEXTCLOUD_URL` pode ser só a raiz
+(`https://nextcloud.jurius-api.com`) — o `/remote.php/dav/files/USUARIO` é montado
+pelo serviço.
 
-**"Token exigido mas Supabase não configurado"** (em vermelho na página): nesse
+**"Login do CRM exigido" em vermelho** (em vermelho na página): nesse
 estado toda chamada de documento é recusada com 401, de propósito. Preencha
 `SUPABASE_URL` e `SUPABASE_ANON_KEY`.
 
@@ -123,15 +124,26 @@ Editor (navegador)                     Este serviço                 Nextcloud
 
 ## Variáveis
 
-| Variável | Para que serve |
-| --- | --- |
-| `SUPABASE_URL` / `SUPABASE_ANON_KEY` | validar o token de quem chama |
-| `NEXTCLOUD_BASE_URL` | raiz WebDAV: `https://…/remote.php/dav/files/USUARIO` |
-| `NEXTCLOUD_USER` / `NEXTCLOUD_PASSWORD` | credencial (use senha de app) |
-| `SYNCFUSION_LICENSE_KEY` | mesma chave do servidor de documentos |
-| `COLLAB_ALLOWED_ORIGINS` | origens do CRM permitidas |
-| `COLLAB_AUTH_REQUIRE` | `false` desliga a exigência de token — só em ambiente fechado |
-| `COLLAB_DEMO_ENABLED` | `false` desliga a página inicial e o `/demohub` |
+Os nomes são de propósito **iguais aos que o CRM já usa** — é copiar e colar, sem
+converter nada:
+
+| Variável | Para que serve | De onde copiar |
+| --- | --- | --- |
+| `NEXTCLOUD_URL` | raiz do Nextcloud (só o domínio; o `/remote.php/dav/files/USUARIO` é montado aqui) | segredo `NEXTCLOUD_URL` no Supabase |
+| `NEXTCLOUD_USER` | usuário do Nextcloud | segredo `NEXTCLOUD_USER` no Supabase |
+| `NEXTCLOUD_APP_PASSWORD` | senha de app do Nextcloud | segredo `NEXTCLOUD_APP_PASSWORD` no Supabase |
+| `SUPABASE_URL` | projeto Supabase, para conferir quem está logado | `VITE_SUPABASE_URL` no `.env` do CRM |
+| `SUPABASE_ANON_KEY` | chave anônima do Supabase | `VITE_SUPABASE_ANON_KEY` no `.env` do CRM |
+| `SYNCFUSION_LICENSE_KEY` | licença do motor de documentos | `VITE_SYNCFUSION_LICENSE_KEY` no `.env` do CRM |
+| `COLLAB_ALLOWED_ORIGINS` | origens do CRM permitidas | opcional |
+| `COLLAB_AUTH_REQUIRE` | `false` deixa qualquer um editar — só em ambiente fechado | opcional |
+| `COLLAB_DEMO_ENABLED` | `false` desliga a página inicial e o `/demohub` | opcional |
+
+> **"Login do CRM exigido"** na página inicial não é uma chave que você precise
+> procurar: é o `COLLAB_AUTH_REQUIRE`, que já vem `true`. Ele fica verde sozinho
+> assim que `SUPABASE_URL` e `SUPABASE_ANON_KEY` estiverem preenchidos. Vermelho ali
+> significa "está exigindo login mas não sabe conferir com quem" — nenhum documento
+> abriria.
 
 > A versão do pacote `Syncfusion.EJ2.WordEditor.AspNet.Core` (no `.csproj`) precisa ser
 > a **mesma** do npm `@syncfusion/ej2-documenteditor` do CRM — hoje `32.1.19`. Versões

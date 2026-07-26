@@ -91,19 +91,20 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 {
     var log = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Configuração");
     var cfg = app.Configuration;
-    string Estado(string key) => string.IsNullOrWhiteSpace(cfg[key]) ? "FALTANDO" : "ok";
+    string Estado(params string[] keys) =>
+        keys.Any(key => !string.IsNullOrWhiteSpace(cfg[key])) ? "ok" : "FALTANDO";
 
     log.LogInformation(
-        "Co-edição Jurius iniciando · Redis: {Redis} · Nextcloud: BaseUrl {NcUrl}, User {NcUser}, Password {NcPass} · " +
-        "Supabase: Url {SbUrl}, AnonKey {SbKey} · Licença Syncfusion: {Lic} · Token exigido: {Auth} · Demonstração: {Demo}",
+        "Co-edição Jurius iniciando · Redis: {Redis} · Nextcloud: Url {NcUrl}, User {NcUser}, Senha {NcPass} · " +
+        "Supabase: Url {SbUrl}, AnonKey {SbKey} · Licença Syncfusion: {Lic} · Login exigido: {Auth} · Demonstração: {Demo}",
         redisConnectionString,
-        Estado("Nextcloud:BaseUrl"), Estado("Nextcloud:User"), Estado("Nextcloud:Password"),
+        Estado("Nextcloud:Url", "Nextcloud:BaseUrl"), Estado("Nextcloud:User"), Estado("Nextcloud:AppPassword", "Nextcloud:Password"),
         Estado("Supabase:Url"), Estado("Supabase:AnonKey"),
         Estado("Syncfusion:LicenseKey"),
         !string.Equals(cfg["Auth:Require"], "false", StringComparison.OrdinalIgnoreCase),
         demoEnabled);
 
-    if (string.IsNullOrWhiteSpace(cfg["Nextcloud:BaseUrl"]))
+    if (string.IsNullOrWhiteSpace(cfg["Nextcloud:Url"]) && string.IsNullOrWhiteSpace(cfg["Nextcloud:BaseUrl"]))
     {
         log.LogWarning(
             "Sem Nextcloud configurado o serviço sobe, mas não consegue abrir nem gravar documento. " +

@@ -27,9 +27,11 @@ services:
       Demo__Enabled: "${COLLAB_DEMO_ENABLED:-true}"
       Supabase__Url: "${SUPABASE_URL}"
       Supabase__AnonKey: "${SUPABASE_ANON_KEY}"
-      Nextcloud__BaseUrl: "${NEXTCLOUD_BASE_URL}"
+      # Mesmos nomes que o CRM usa no Supabase — copie os valores como estão.
+      # Aceita a raiz do Nextcloud; o /remote.php/dav/files/USUARIO é montado aqui.
+      Nextcloud__Url: "${NEXTCLOUD_URL}"
       Nextcloud__User: "${NEXTCLOUD_USER}"
-      Nextcloud__Password: "${NEXTCLOUD_PASSWORD}"
+      Nextcloud__AppPassword: "${NEXTCLOUD_APP_PASSWORD}"
       Syncfusion__LicenseKey: "${SYNCFUSION_LICENSE_KEY}"
     ports:
       # 54873: porta alta e fora do caminho — não bate com 9000 (portainer),

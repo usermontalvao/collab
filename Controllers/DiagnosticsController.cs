@@ -195,7 +195,7 @@ namespace Jurius.CollabEditing.Controllers
                 {
                     Ok = false,
                     Configured = false,
-                    Detail = "faltam Nextcloud__BaseUrl / User / Password",
+                    Detail = "faltam NEXTCLOUD_URL / NEXTCLOUD_USER / NEXTCLOUD_APP_PASSWORD",
                 };
             }
 
@@ -262,14 +262,30 @@ namespace Jurius.CollabEditing.Controllers
 
                 string sfdt = Newtonsoft.Json.JsonConvert.SerializeObject(document);
                 document.Dispose();
-                var carriesText = sfdt.Contains(marker, StringComparison.Ordinal);
                 steps.Add(new SelfTestStep
                 {
                     Step = "Converter para SFDT (o formato que vai ao navegador)",
-                    Ok = carriesText,
-                    Detail = carriesText
-                        ? $"{sfdt.Length} caracteres, texto preservado"
-                        : "o texto não sobreviveu à conversão",
+                    Ok = !string.IsNullOrWhiteSpace(sfdt) && sfdt.Length > 32,
+                    Detail = $"{sfdt.Length} caracteres",
+                });
+
+                // A volta: SFDT -> .docx é exatamente o que o serviço faz ao gravar
+                // no Nextcloud. Conferir o texto AQUI vale muito mais do que
+                // procurar a palavra dentro do JSON do SFDT — o formato comprime e
+                // reorganiza o conteúdo, então texto "sumido" lá não quer dizer
+                // nada, enquanto sumir aqui significaria petição gravada errada.
+                Syncfusion.DocIO.DLS.WordDocument roundTrip = WordDocument.Save(sfdt);
+                var text = roundTrip.GetText() ?? string.Empty;
+                roundTrip.Dispose();
+
+                var keptText = text.Contains(marker, StringComparison.Ordinal);
+                steps.Add(new SelfTestStep
+                {
+                    Step = "Voltar para .docx (o mesmo caminho da gravação)",
+                    Ok = keptText,
+                    Detail = keptText
+                        ? "texto preservado na ida e na volta"
+                        : "o texto não sobreviveu — confira a licença Syncfusion nos logs",
                 });
 
                 watch.Stop();

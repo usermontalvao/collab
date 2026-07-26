@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.Sockets;
 using StackExchange.Redis;
+using Xunit;
 
 namespace Jurius.CollabEditing.Tests.Infra;
 

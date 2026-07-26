@@ -6,11 +6,22 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Jurius.CollabEditing</RootNamespace>
     <!--
-      IMPORTANTE: precisa bater com a versão do npm @syncfusion/ej2-documenteditor
-      usada no front (hoje 32.1.19). Formato SFDT e operações mudam entre versões.
+      IMPORTANTE: precisa bater EXATAMENTE com a versão do npm
+      @syncfusion/ej2-documenteditor usada no front. Formato SFDT e operações
+      mudam entre versões — e o front resolvia 32.1.21 enquanto aqui estava
+      preso em 32.1.19. O package.json do CRM está pinado (sem `^`) na mesma
+      versão justamente para não voltar a divergir sozinho.
     -->
-    <SyncfusionVersion>32.1.19</SyncfusionVersion>
+    <SyncfusionVersion>32.1.21</SyncfusionVersion>
   </PropertyGroup>
+
+  <!-- Os testes têm o próprio projeto; sem isto o SDK Web os compilaria aqui. -->
+  <ItemGroup>
+    <Compile Remove="tests/**" />
+    <Content Remove="tests/**" />
+    <None Remove="tests/**" />
+    <EmbeddedResource Remove="tests/**" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.SignalR.StackExchangeRedis" Version="8.0.11" />

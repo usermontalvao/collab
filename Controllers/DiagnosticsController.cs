@@ -189,9 +189,14 @@ namespace Jurius.CollabEditing.Controllers
 
         private async Task<CheckResult> CheckNextcloud()
         {
-            if (string.IsNullOrWhiteSpace(_config["Nextcloud:BaseUrl"]))
+            if (!_storage.IsConfigured)
             {
-                return new CheckResult { Ok = false, Configured = false, Detail = "sem Nextcloud__BaseUrl" };
+                return new CheckResult
+                {
+                    Ok = false,
+                    Configured = false,
+                    Detail = "faltam Nextcloud__BaseUrl / User / Password",
+                };
             }
 
             var watch = Stopwatch.StartNew();

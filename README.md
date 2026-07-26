@@ -68,6 +68,37 @@ ele **não** mostra nome de cliente, caminho de arquivo nem conteúdo de documen
 sala aparece como hash e quem edita aparece só por iniciais (`L.M.`). Para desligar
 a página e o teste de WebSocket: `COLLAB_DEMO_ENABLED=false`.
 
+## Quando algo não sobe
+
+O serviço **não morre** por falta de configuração: ele sobe, recusa as rotas de
+documento e mostra na página inicial o que está faltando. O `docker logs` também
+imprime um resumo logo no start:
+
+```
+Co-edição Jurius iniciando · Redis: redis:6379 · Nextcloud: BaseUrl FALTANDO, User FALTANDO … 
+```
+
+**Variáveis não chegaram ao container?** É o tropeço mais comum:
+
+- Pela linha de comando: o `.env` precisa estar **na mesma pasta** do
+  `docker-compose.yml`. Confirme o que o compose entendeu com:
+  ```bash
+  docker compose config
+  ```
+  Se aparecer `Supabase__Url: ""`, o `.env` não foi lido.
+- **Pelo Portainer (stack a partir do Git): o `.env` do repositório é ignorado.**
+  As variáveis têm de ser cadastradas na aba *Environment variables* da stack —
+  com os mesmos nomes do `.env.example` (`SUPABASE_URL`, `NEXTCLOUD_BASE_URL`, …).
+
+**Nextcloud recusando a credencial?** A página inicial diz "credencial recusada"
+quando volta 401/403. Use uma *senha de app* do Nextcloud (Configurações →
+Segurança), não a senha da conta, e confira se a `BaseUrl` termina no usuário:
+`https://…/remote.php/dav/files/USUARIO`.
+
+**"Token exigido mas Supabase não configurado"** (em vermelho na página): nesse
+estado toda chamada de documento é recusada com 401, de propósito. Preencha
+`SUPABASE_URL` e `SUPABASE_ANON_KEY`.
+
 ## Como funciona
 
 ```

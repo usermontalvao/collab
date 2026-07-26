@@ -29,8 +29,10 @@ builder.Services.AddCors(options =>
     });
 });
 
-var redisConnectionString = builder.Configuration["ConnectionStrings:RedisConnectionString"]
-    ?? throw new InvalidOperationException("Defina ConnectionStrings__RedisConnectionString.");
+// Cai no serviço do compose quando não vier configurado — o serviço sobe e a
+// página inicial mostra se o Redis respondeu ou não.
+var redisConnectionString = builder.Configuration["ConnectionStrings:RedisConnectionString"];
+if (string.IsNullOrWhiteSpace(redisConnectionString)) redisConnectionString = "redis:6379";
 
 // Backplane do SignalR: sem ele, dois containers da aplicação não entregam as
 // operações um do outro.
@@ -83,5 +85,31 @@ if (demoEnabled)
 app.MapControllers();
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+
+// Resumo da configuração no start: com isto o `docker logs` já diz o que falta,
+// em vez de deixar o problema aparecer só na hora de abrir um documento.
+{
+    var log = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Configuração");
+    var cfg = app.Configuration;
+    string Estado(string key) => string.IsNullOrWhiteSpace(cfg[key]) ? "FALTANDO" : "ok";
+
+    log.LogInformation(
+        "Co-edição Jurius iniciando · Redis: {Redis} · Nextcloud: BaseUrl {NcUrl}, User {NcUser}, Password {NcPass} · " +
+        "Supabase: Url {SbUrl}, AnonKey {SbKey} · Licença Syncfusion: {Lic} · Token exigido: {Auth} · Demonstração: {Demo}",
+        redisConnectionString,
+        Estado("Nextcloud:BaseUrl"), Estado("Nextcloud:User"), Estado("Nextcloud:Password"),
+        Estado("Supabase:Url"), Estado("Supabase:AnonKey"),
+        Estado("Syncfusion:LicenseKey"),
+        !string.Equals(cfg["Auth:Require"], "false", StringComparison.OrdinalIgnoreCase),
+        demoEnabled);
+
+    if (string.IsNullOrWhiteSpace(cfg["Nextcloud:BaseUrl"]))
+    {
+        log.LogWarning(
+            "Sem Nextcloud configurado o serviço sobe, mas não consegue abrir nem gravar documento. " +
+            "Confira se o arquivo .env existe ao lado do docker-compose.yml e se as variáveis chegaram ao container " +
+            "(docker compose config mostra os valores já resolvidos).");
+    }
+}
 
 app.Run();

@@ -173,7 +173,14 @@
       html += componentRow('Nextcloud', d.nextcloud.ok,
         d.nextcloud.configured ? (d.nextcloud.ok ? d.nextcloud.latencyMs + ' ms' : esc(d.nextcloud.detail)) : 'não configurado');
       html += componentRow('Licença Syncfusion', d.license.configured, d.license.configured ? 'registrada' : 'ausente');
-      html += componentRow('Token exigido', d.auth.required, d.auth.required ? 'sim (Supabase)' : 'NÃO — só para ambiente fechado');
+      // Exigir token sem ter Supabase configurado recusa TUDO com 401 — é o pior
+      // dos casos e precisa aparecer em vermelho, não em verde.
+      var authBroken = d.auth.required && !d.auth.supabaseConfigured;
+      html += componentRow(
+        'Token exigido',
+        d.auth.required && !authBroken,
+        authBroken ? 'exigido mas Supabase não configurado — tudo será recusado'
+                   : (d.auth.required ? 'sim (Supabase)' : 'NÃO — só para ambiente fechado'));
       $('components').innerHTML = html;
       return d;
     }).catch(function () {

@@ -6,9 +6,15 @@ namespace Jurius.CollabEditing.Services
     /// <summary>
     /// Leitura/gravação dos .docx no Nextcloud por WebDAV. É a origem e o destino
     /// do documento da sala: o exemplo da Syncfusion usava um arquivo em wwwroot.
+    ///
+    /// Sem configuração o serviço NÃO deixa de subir: só as operações de documento
+    /// falham, com mensagem clara, e a página inicial mostra o que está faltando.
+    /// Validar no construtor derrubava o processo no start e deixava o container
+    /// em loop de reinício, sem página nenhuma para explicar o motivo.
     /// </summary>
     public interface INextcloudStorage
     {
+        bool IsConfigured { get; }
         Task<Stream> DownloadAsync(string relativePath, CancellationToken cancellationToken = default);
         Task UploadAsync(string relativePath, Stream content, CancellationToken cancellationToken = default);
     }
@@ -18,34 +24,45 @@ namespace Jurius.CollabEditing.Services
         private readonly HttpClient _http;
         private readonly ILogger<NextcloudStorage> _logger;
         private readonly string _baseUrl;
+        private readonly string _user;
+        private readonly string _password;
 
         public NextcloudStorage(HttpClient http, IConfiguration config, ILogger<NextcloudStorage> logger)
         {
             _logger = logger;
-
-            var baseUrl = config["Nextcloud:BaseUrl"];
-            var user = config["Nextcloud:User"];
-            var password = config["Nextcloud:Password"];
-
-            if (string.IsNullOrWhiteSpace(baseUrl) || string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(password))
-            {
-                throw new InvalidOperationException(
-                    "Nextcloud não configurado. Defina Nextcloud__BaseUrl, Nextcloud__User e Nextcloud__Password.");
-            }
-
-            // Ex.: https://cloud.exemplo.com/remote.php/dav/files/usuario
-            _baseUrl = baseUrl.TrimEnd('/');
             _http = http;
             _http.Timeout = TimeSpan.FromMinutes(3);
-            _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-                "Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{user}:{password}")));
+
+            // Ex.: https://cloud.exemplo.com/remote.php/dav/files/usuario
+            _baseUrl = (config["Nextcloud:BaseUrl"] ?? string.Empty).TrimEnd('/');
+            _user = config["Nextcloud:User"] ?? string.Empty;
+            _password = config["Nextcloud:Password"] ?? string.Empty;
         }
+
+        public bool IsConfigured =>
+            !string.IsNullOrWhiteSpace(_baseUrl) &&
+            !string.IsNullOrWhiteSpace(_user) &&
+            !string.IsNullOrWhiteSpace(_password);
+
+        private void EnsureConfigured()
+        {
+            if (IsConfigured) return;
+            throw new InvalidOperationException(
+                "Nextcloud não configurado. Defina Nextcloud__BaseUrl, Nextcloud__User e Nextcloud__Password.");
+        }
+
+        // O cabeçalho vai em cada requisição, não no HttpClient: a fábrica entrega
+        // instâncias compartilhadas e mexer no DefaultRequestHeaders daria corrida.
+        private AuthenticationHeaderValue BuildAuth() =>
+            new("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{_user}:{_password}")));
 
         private string BuildUrl(string relativePath)
         {
             var clean = (relativePath ?? string.Empty).Replace('\\', '/').TrimStart('/');
-            if (clean.Length == 0) throw new ArgumentException("Caminho vazio.", nameof(relativePath));
             if (clean.Contains("..")) throw new ArgumentException("Caminho inválido.", nameof(relativePath));
+
+            // "." é a própria raiz — usado só pelo diagnóstico da página inicial.
+            if (clean.Length == 0 || clean == ".") return _baseUrl;
 
             // Cada segmento é escapado separadamente: nomes de pastas de clientes
             // têm espaço e acento, mas as barras precisam continuar sendo barras.
@@ -55,8 +72,12 @@ namespace Jurius.CollabEditing.Services
 
         public async Task<Stream> DownloadAsync(string relativePath, CancellationToken cancellationToken = default)
         {
-            var url = BuildUrl(relativePath);
-            using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            EnsureConfigured();
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, BuildUrl(relativePath));
+            request.Headers.Authorization = BuildAuth();
+
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogError("Falha ao baixar {Path} do Nextcloud: {Status}", relativePath, response.StatusCode);
@@ -73,10 +94,11 @@ namespace Jurius.CollabEditing.Services
 
         public async Task UploadAsync(string relativePath, Stream content, CancellationToken cancellationToken = default)
         {
-            var url = BuildUrl(relativePath);
+            EnsureConfigured();
             content.Position = 0;
 
-            using var request = new HttpRequestMessage(HttpMethod.Put, url);
+            using var request = new HttpRequestMessage(HttpMethod.Put, BuildUrl(relativePath));
+            request.Headers.Authorization = BuildAuth();
             request.Content = new StreamContent(content);
             request.Content.Headers.ContentType = new MediaTypeHeaderValue(
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document");

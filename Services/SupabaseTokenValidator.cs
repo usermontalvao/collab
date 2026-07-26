@@ -34,17 +34,24 @@ namespace Jurius.CollabEditing.Services
             _anonKey = config["Supabase:AnonKey"] ?? string.Empty;
             _required = !string.Equals(config["Auth:Require"], "false", StringComparison.OrdinalIgnoreCase);
 
-            if (_required && (string.IsNullOrWhiteSpace(_supabaseUrl) || string.IsNullOrWhiteSpace(_anonKey)))
+            if (_required && !IsConfigured)
             {
-                throw new InvalidOperationException(
+                // Falha FECHADA, mas sem derrubar o processo: o serviço sobe, recusa
+                // as rotas de documento e a página inicial mostra o que falta. Antes
+                // isso estourava no construtor e o container só reiniciava em loop.
+                _logger.LogError(
                     "Autenticação exigida mas Supabase__Url/Supabase__AnonKey não foram configurados. " +
-                    "Configure-os ou defina Auth__Require=false (apenas em ambiente fechado).");
+                    "Enquanto isso, toda chamada de documento será recusada com 401.");
             }
         }
+
+        private bool IsConfigured =>
+            !string.IsNullOrWhiteSpace(_supabaseUrl) && !string.IsNullOrWhiteSpace(_anonKey);
 
         public async Task<bool> IsValidAsync(string accessToken, CancellationToken cancellationToken = default)
         {
             if (!_required) return true;
+            if (!IsConfigured) return false;
             if (string.IsNullOrWhiteSpace(accessToken)) return false;
 
             if (_cache.TryGetValue(accessToken, out var expiresAt))

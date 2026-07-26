@@ -64,12 +64,48 @@ namespace Jurius.CollabEditing.Hubs
                     .Where(member => member != null)
                     .ToList();
 
+                // SOBRAS DA MESMA PESSOA. Quando uma aba morre sem avisar (queda de
+                // rede, reinício do serviço, aba fechada à força), o
+                // OnDisconnectedAsync não roda e a entrada fica na sala para sempre.
+                // Resultado na tela: a pessoa abre o documento sozinha e vê o
+                // PRÓPRIO nome como "fulano também está neste documento".
+                // Ao reentrar, as conexões antigas do mesmo usuário são removidas.
+                if (!string.IsNullOrWhiteSpace(info.UserId))
+                {
+                    var stale = userList
+                        .Where(member =>
+                            string.Equals(member.UserId, info.UserId, StringComparison.Ordinal) &&
+                            !string.Equals(member.ConnectionId, Context.ConnectionId, StringComparison.Ordinal))
+                        .ToList();
+
+                    foreach (var member in stale)
+                    {
+                        await _db.HashDeleteAsync(usersKey, member.ConnectionId);
+                        await _db.HashDeleteAsync(CollaborativeEditingHelper.ConnectionIdRoomMappingKey, member.ConnectionId);
+                        userList.Remove(member);
+                        // Quem já estava na sala também precisa esquecer a conexão morta.
+                        await Clients.Group(info.RoomName).SendAsync("dataReceived", "removeUser", member.ConnectionId);
+                    }
+
+                    if (stale.Count > 0)
+                    {
+                        _logger.LogInformation(
+                            "Sala {Room}: {Count} conexão(ões) antiga(s) do mesmo usuário removidas ao reentrar.",
+                            info.RoomName, stale.Count);
+                    }
+                }
+
                 // Quem acabou de entrar recebe a lista de quem já estava.
                 await Clients.Caller.SendAsync("dataReceived", "addUser", userList);
             }
 
             await _db.HashSetAsync(usersKey, Context.ConnectionId, JsonConvert.SerializeObject(info));
             await _db.HashSetAsync(CollaborativeEditingHelper.ConnectionIdRoomMappingKey, Context.ConnectionId, info.RoomName);
+            // Rede de segurança para a sala inteira: se TODAS as conexões morrerem
+            // sem aviso, a lista de participantes some sozinha em vez de ficar
+            // mostrando gente que não está mais lá. O prazo é renovado a cada
+            // entrada, então uma sala em uso nunca expira.
+            await _db.KeyExpireAsync(usersKey, TimeSpan.FromHours(12));
 
             _activity.Record("entrou", info.RoomName, info.CurrentUser);
             _logger.LogInformation(

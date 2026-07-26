@@ -279,9 +279,14 @@ namespace Jurius.CollabEditing.Model
 
     /// <summary>
     /// Quem entra na sala. ACRÉSCIMO NOSSO: o `ActionInfo` da Syncfusion só tem o
-    /// nome; para mostrar a foto de quem está editando (estilo Google Docs) o
-    /// cliente manda também o id e a URL do avatar. Quem chama `JoinGroup` é o
+    /// nome; aqui vai também o id do usuário no CRM. Quem chama `JoinGroup` é o
     /// nosso próprio código, não o Document Editor — por isso dá para estender.
+    ///
+    /// NÃO existe campo de foto aqui, de propósito. A foto de perfil do CRM pode
+    /// ser um `data:` embutido de megabytes; mandá-la na entrada da sala estoura o
+    /// limite de mensagem do SignalR e o servidor DERRUBA a conexão — a co-edição
+    /// morre antes de começar. Cada cliente resolve a foto pelo `UserId`,
+    /// direto do Supabase (ver `userAvatars.ts` no CRM).
     /// </summary>
     public class RoomMemberInfo
     {
@@ -289,7 +294,6 @@ namespace Jurius.CollabEditing.Model
         public string ConnectionId { get; set; }
         public string CurrentUser { get; set; }
         public string UserId { get; set; }
-        public string AvatarUrl { get; set; }
         /// <summary>Está digitando neste instante (não é persistido).</summary>
         public bool Typing { get; set; }
     }

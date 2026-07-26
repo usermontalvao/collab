@@ -36,7 +36,15 @@ if (string.IsNullOrWhiteSpace(redisConnectionString)) redisConnectionString = "r
 
 // Backplane do SignalR: sem ele, dois containers da aplicação não entregam as
 // operações um do outro.
-builder.Services.AddSignalR().AddStackExchangeRedis(redisConnectionString, options =>
+builder.Services.AddSignalR(options =>
+{
+    // O padrão do SignalR é 32 KB por mensagem — pequeno demais para este uso.
+    // Colar uma imagem, uma tabela grande ou um trecho longo vira UMA operação
+    // do Document Editor bem maior que isso, e a mensagem que estoura o limite
+    // não é rejeitada: o servidor DERRUBA a conexão. O sintoma na tela é a
+    // co-edição morrer do nada no meio da edição.
+    options.MaximumReceiveMessageSize = 32 * 1024 * 1024;
+}).AddStackExchangeRedis(redisConnectionString, options =>
 {
     options.Configuration.ChannelPrefix = StackExchange.Redis.RedisChannel.Literal("docedit");
 });

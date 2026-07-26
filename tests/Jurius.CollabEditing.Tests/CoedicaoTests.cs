@@ -181,6 +181,79 @@ public class CoedicaoTests
         Assert.Equal(0, Volatile.Read(ref avisos));
     }
 
+    [SkippableFact(DisplayName = "Reentrar limpa a conexão antiga da MESMA pessoa (não vira 'outra pessoa na sala')")]
+    public async Task ReentrarRemoveConexaoAntigaDoMesmoUsuario()
+    {
+        using var servico = NovoServico();
+        const string sala = "sala_sobra";
+        await AbrirDocumento(servico.CreateClient(), sala);
+
+        // Primeira aba entra e "morre" sem que o servidor perceba: para simular
+        // isso, entramos e deixamos a conexão viva, mas reentramos com o mesmo
+        // usuário por outra conexão — é o que acontece quando a rede cai e o
+        // navegador reabre o documento antes do servidor derrubar a antiga.
+        await using var abaAntiga = await servico.ConnectHubAsync();
+        await abaAntiga.InvokeAsync("JoinGroup", new RoomMemberInfo
+        {
+            RoomName = sala,
+            CurrentUser = "Pedro",
+            UserId = "u-pedro",
+        });
+
+        await using var abaNova = await servico.ConnectHubAsync();
+        var listaRecebida = new List<int>();
+        abaNova.On<string, System.Text.Json.JsonElement>("dataReceived", (tipo, dados) =>
+        {
+            if (tipo != "addUser") return;
+            listaRecebida.Add(dados.ValueKind == System.Text.Json.JsonValueKind.Array ? dados.GetArrayLength() : 1);
+        });
+
+        await abaNova.InvokeAsync("JoinGroup", new RoomMemberInfo
+        {
+            RoomName = sala,
+            CurrentUser = "Pedro",
+            UserId = "u-pedro",
+        });
+
+        Assert.True(await Ate(() => listaRecebida.Count > 0), "A nova aba não recebeu a lista da sala.");
+        // A sala tem de chegar VAZIA: a única outra conexão era dele mesmo.
+        Assert.Equal(0, listaRecebida[0]);
+    }
+
+    [SkippableFact(DisplayName = "Reentrar NÃO remove as outras pessoas da sala")]
+    public async Task ReentrarPreservaAsOutrasPessoas()
+    {
+        using var servico = NovoServico();
+        const string sala = "sala_sobra_outros";
+        await AbrirDocumento(servico.CreateClient(), sala);
+
+        await using var ana = await servico.ConnectHubAsync();
+        await ana.InvokeAsync("JoinGroup", new RoomMemberInfo
+        {
+            RoomName = sala,
+            CurrentUser = "Ana",
+            UserId = "u-ana",
+        });
+
+        await using var pedro = await servico.ConnectHubAsync();
+        var tamanhoDaLista = new List<int>();
+        pedro.On<string, System.Text.Json.JsonElement>("dataReceived", (tipo, dados) =>
+        {
+            if (tipo != "addUser") return;
+            tamanhoDaLista.Add(dados.ValueKind == System.Text.Json.JsonValueKind.Array ? dados.GetArrayLength() : 1);
+        });
+
+        await pedro.InvokeAsync("JoinGroup", new RoomMemberInfo
+        {
+            RoomName = sala,
+            CurrentUser = "Pedro",
+            UserId = "u-pedro",
+        });
+
+        Assert.True(await Ate(() => tamanhoDaLista.Count > 0), "Pedro não recebeu a lista da sala.");
+        Assert.Equal(1, tamanhoDaLista[0]);
+    }
+
     // ---------------------------------------------------------------- gravação
 
     [SkippableFact(DisplayName = "Salvar força a gravação no Nextcloud e o documento reaberto tem o texto")]

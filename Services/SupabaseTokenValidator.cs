@@ -106,8 +106,13 @@ namespace Jurius.CollabEditing.Services
         public async Task InvokeAsync(HttpContext context, ISupabaseTokenValidator validator)
         {
             var path = context.Request.Path.Value ?? string.Empty;
+
+            // Protegido = só o que chega perto de documento. A página inicial, o
+            // /api/diagnostics (booleanos e tempos, sem nada de cliente) e o
+            // /demohub (eco puro) ficam abertos, para dar para conferir o serviço
+            // logo depois de subir, sem token nenhum.
             var isProtected =
-                path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase) ||
+                path.StartsWith("/api/CollaborativeEditing", StringComparison.OrdinalIgnoreCase) ||
                 path.StartsWith("/documenteditorhub", StringComparison.OrdinalIgnoreCase);
 
             // O preflight do CORS não carrega credencial por definição.

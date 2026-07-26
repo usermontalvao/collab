@@ -161,8 +161,23 @@
     });
   }
 
+  // Erro de fetch sem o status HTTP não diz nada — 401 e 500 aparecem iguais.
+  function askJson(url, options) {
+    return fetch(url, options).then(function (r) {
+      if (!r.ok) {
+        return r.text().then(function (body) {
+          var motivo = r.status === 401 ? 'o serviço recusou a chamada (401) — esta rota deveria ser pública'
+                     : r.status === 404 ? 'rota não encontrada (404) — imagem antiga no container?'
+                     : 'HTTP ' + r.status + (body ? ' · ' + body.slice(0, 140) : '');
+          throw new Error(motivo);
+        });
+      }
+      return r.json();
+    });
+  }
+
   function loadStatus() {
-    return fetch('/api/diagnostics').then(function (r) { return r.json(); }).then(function (d) {
+    return askJson('/api/diagnostics').then(function (d) {
       var healthy = d.status === 'ok';
       $('statusDot').className = 'dot ' + (healthy ? 'ok' : 'bad');
       $('statusText').textContent = healthy ? 'serviço no ar' : 'serviço degradado';
@@ -183,15 +198,15 @@
                    : (d.auth.required ? 'sim (Supabase)' : 'NÃO — só para ambiente fechado'));
       $('components').innerHTML = html;
       return d;
-    }).catch(function () {
+    }).catch(function (err) {
       $('statusDot').className = 'dot bad';
       $('statusText').textContent = 'sem resposta';
-      $('components').innerHTML = '<div class="empty">não foi possível falar com o serviço</div>';
+      $('components').innerHTML = '<div class="empty">' + esc(err && err.message ? err.message : 'não foi possível falar com o serviço') + '</div>';
     });
   }
 
   function loadActivity() {
-    return fetch('/api/diagnostics/activity').then(function (r) { return r.json(); }).then(function (d) {
+    return askJson('/api/diagnostics/activity').then(function (d) {
       $('mRooms').textContent = d.totals.rooms;
       $('mPeople').textContent = d.totals.people;
       $('mOps').textContent = d.totals.operations;
@@ -240,8 +255,7 @@
     var btn = this;
     btn.disabled = true;
     $('selftestResult').textContent = 'rodando…';
-    fetch('/api/diagnostics/selftest', { method: 'POST' })
-      .then(function (r) { return r.json(); })
+    askJson('/api/diagnostics/selftest', { method: 'POST' })
       .then(function (d) {
         var html = (d.steps || []).map(function (s) {
           return '<div class="row"><span class="name"><span class="dot ' + (s.ok ? 'ok' : 'bad') +
@@ -253,7 +267,10 @@
           ' · ' + d.elapsedMs + ' ms</div>';
         $('selftestResult').innerHTML = html;
       })
-      .catch(function () { $('selftestResult').textContent = 'não foi possível rodar o teste'; })
+      .catch(function (err) {
+        $('selftestResult').textContent = 'não foi possível rodar o teste — ' +
+          (err && err.message ? err.message : 'sem resposta');
+      })
       .finally(function () { btn.disabled = false; });
   });
 

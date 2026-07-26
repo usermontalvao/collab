@@ -16,8 +16,17 @@ namespace Jurius.CollabEditing.Controllers
     ///   UpdateAction          — recebe uma operação, versiona, transforma e distribui
     ///   GetActionsFromServer  — reenvia operações que o cliente perdeu
     ///
+    /// E um endpoint NOSSO, que o Document Editor não tem:
+    ///   SaveToSource          — grava agora o que está pendente (o botão Salvar)
+    ///
     /// A lógica de versão/transformação é a do exemplo oficial da Syncfusion. O que
-    /// mudamos: o documento de origem vem do Nextcloud (e volta para lá).
+    /// mudamos: o documento de origem vem do Nextcloud (e volta para lá) e a
+    /// gravação pode ser pedida a qualquer momento, não só quando a sala esvazia.
+    ///
+    /// TODAS as rotas exigem token do Supabase (ver SupabaseAuthMiddleware). O
+    /// Document Editor manda `UpdateAction`/`GetActionsFromServer` por XMLHttpRequest
+    /// próprio, com os cabeçalhos de `documentEditor.headers` — é lá, no front, que o
+    /// `Authorization` é colocado.
     /// </summary>
     [Route("api/[controller]")]
     [ApiController]
@@ -27,6 +36,7 @@ namespace Jurius.CollabEditing.Controllers
         private readonly IConnectionMultiplexer _redisConnection;
         private readonly IHubContext<DocumentEditorHub> _hubContext;
         private readonly INextcloudStorage _storage;
+        private readonly IRoomPersistence _persistence;
         private readonly IActivityTracker _activity;
         private readonly ILogger<CollaborativeEditingController> _logger;
 
@@ -35,6 +45,7 @@ namespace Jurius.CollabEditing.Controllers
             IConnectionMultiplexer redisConnection,
             IBackgroundTaskQueue taskQueue,
             INextcloudStorage storage,
+            IRoomPersistence persistence,
             IActivityTracker activity,
             ILogger<CollaborativeEditingController> logger)
         {
@@ -43,6 +54,7 @@ namespace Jurius.CollabEditing.Controllers
             _redisConnection = redisConnection;
             _saveTaskQueue = taskQueue;
             _storage = storage;
+            _persistence = persistence;
             _logger = logger;
         }
 
@@ -105,29 +117,55 @@ namespace Jurius.CollabEditing.Controllers
 
                 _activity.CountImport();
                 _activity.Record("abriu documento", param.roomName, null, $"versão {version}");
+                _logger.LogInformation(
+                    "Sala {Room}: documento aberto na versão {Version} ({Pending} operações pendentes aplicadas).",
+                    param.roomName, version, actions.Count);
 
                 return Content(JsonConvert.SerializeObject(content), "application/json");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Falha ao abrir {Path} para a sala {Room}.", param.filePath, param.roomName);
+                // Sem o caminho: ele carrega nome de cliente/processo.
+                _logger.LogError(ex, "Falha ao abrir o documento da sala {Room}.", param.roomName);
                 return StatusCode(StatusCodes.Status500InternalServerError, "Não foi possível abrir o documento para co-edição.");
             }
         }
 
         [HttpPost]
         [Route("UpdateAction")]
-        public async Task<ActionInfo> UpdateAction(ActionInfo param)
+        public async Task<IActionResult> UpdateAction([FromBody] ActionInfo param)
         {
-            ActionInfo modifiedAction = await AddOperationsToCache(param);
-            _activity.CountOperation();
-            await _hubContext.Clients.Group(param.RoomName).SendAsync("dataReceived", "action", modifiedAction);
-            return modifiedAction;
+            if (param == null || string.IsNullOrWhiteSpace(param.RoomName))
+            {
+                return BadRequest("roomName é obrigatório.");
+            }
+
+            try
+            {
+                ActionInfo modifiedAction = await AddOperationsToCache(param);
+                _activity.CountOperation();
+
+                // Volta para a sala INTEIRA, inclusive quem enviou: é assim que o
+                // Document Editor confirma a própria operação (ele descarta pelo
+                // connectionId) e é o que faz o texto aparecer na tela dos outros.
+                await _hubContext.Clients.Group(param.RoomName).SendAsync("dataReceived", "action", modifiedAction);
+
+                _logger.LogDebug(
+                    "Sala {Room}: operação da conexão {Connection} aceita na versão {Version} ({Count} operações no lote).",
+                    param.RoomName, Mask(param.ConnectionId), modifiedAction.Version, param.Operations?.Count ?? 0);
+
+                return new JsonResult(modifiedAction);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Falha ao registrar a operação da sala {Room}.", param.RoomName);
+                return StatusCode(StatusCodes.Status500InternalServerError, "Não foi possível registrar a edição.");
+            }
         }
 
         [HttpPost]
         [Route("GetActionsFromServer")]
-        public async Task<string> GetActionsFromServer(ActionInfo param)
+        public async Task<string> GetActionsFromServer([FromBody] ActionInfo param)
         {
             try
             {
@@ -146,14 +184,64 @@ namespace Jurius.CollabEditing.Controllers
                 actions.Where(action => !action.IsTransformed).ToList()
                     .ForEach(action => CollaborativeEditingHandler.TransformOperation(action, actions));
 
+                _logger.LogInformation(
+                    "Sala {Room}: reenviando {Count} operações a partir da versão {Version}.",
+                    roomName, actions.Count, lastSyncedVersion);
+
                 return JsonConvert.SerializeObject(actions);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Falha ao reenviar operações da sala {Room}.", param?.RoomName);
-                return "{}";
+                return "[]";
             }
         }
+
+        /// <summary>
+        /// ACRÉSCIMO NOSSO — o botão Salvar do editor.
+        ///
+        /// Aplica AGORA, no .docx do Nextcloud, tudo o que está pendente da sala e
+        /// só responde depois que o Nextcloud confirmou a gravação. É o que permite
+        /// à tela dizer "Salvo" sem mentir: se aqui falhar, o usuário vê o erro.
+        ///
+        /// A sala continua viva e as operações que chegarem durante a gravação NÃO
+        /// são perdidas nem gravadas duas vezes (ver <see cref="RoomPersistence"/>).
+        /// </summary>
+        [HttpPost]
+        [Route("SaveToSource")]
+        public async Task<IActionResult> SaveToSource([FromBody] SaveToSourceInfo param)
+        {
+            if (param == null || string.IsNullOrWhiteSpace(param.roomName))
+            {
+                return BadRequest("roomName é obrigatório.");
+            }
+
+            try
+            {
+                SaveOutcome outcome = await _persistence.PersistAsync(
+                    param.roomName, param.filePath, finalize: false, HttpContext.RequestAborted);
+
+                _activity.Record("gravação pedida pelo editor", param.roomName, null,
+                    $"{outcome.Operations} operações");
+
+                return Ok(outcome);
+            }
+            catch (TimeoutException ex)
+            {
+                _logger.LogWarning(ex, "Sala {Room}: gravação sob demanda não conseguiu a trava.", param.roomName);
+                return StatusCode(StatusCodes.Status409Conflict, "Outra gravação desta sala está em andamento. Tente de novo em instantes.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Sala {Room}: falha na gravação sob demanda.", param.roomName);
+                _activity.Record("falha ao gravar", param.roomName, null, ex.GetType().Name);
+                return StatusCode(StatusCodes.Status500InternalServerError, "Não foi possível gravar o documento no Nextcloud.");
+            }
+        }
+
+        /// <summary>Nome da conexão nunca sai inteiro no log.</summary>
+        private static string Mask(string value) =>
+            string.IsNullOrEmpty(value) ? "—" : (value.Length <= 6 ? value : value[..6] + "…");
 
         private async Task<ActionInfo> AddOperationsToCache(ActionInfo action)
         {
@@ -164,7 +252,7 @@ namespace Jurius.CollabEditing.Controllers
             {
                 action.RoomName + CollaborativeEditingHelper.VersionInfoSuffix,
                 action.RoomName,
-                action.RoomName + CollaborativeEditingHelper.RevisionInfoSuffix,
+                action.RoomName + CollaborativeEditingHelper.OperationOffsetSuffix,
                 action.RoomName + CollaborativeEditingHelper.ActionsToRemoveSuffix,
             };
             RedisValue[] values = new RedisValue[]
@@ -196,20 +284,16 @@ namespace Jurius.CollabEditing.Controllers
 
             if (results.Length > 2 && !results[2].IsNull)
             {
-                RedisResult[] clearedOperation = (RedisResult[])results[2];
-                var actions = clearedOperation
-                    .Select(element => JsonConvert.DeserializeObject<ActionInfo>(element.ToString()))
-                    .ToList();
-
+                // O cache passou do limite: as operações mais antigas já foram para a
+                // fila de gravação. Aqui só pedimos a gravação — quem decide o que
+                // gravar é o RoomPersistence, lendo o Redis na hora.
                 string sourcePath = await database.StringGetAsync(action.RoomName + CollaborativeEditingHelper.SourceInfoSuffix);
-                var message = new SaveInfo
+                _ = _saveTaskQueue.QueueBackgroundWorkItemAsync(new SaveInfo
                 {
-                    Action = actions,
-                    PartialSave = true,
                     RoomName = action.RoomName,
                     SourcePath = sourcePath,
-                };
-                _ = _saveTaskQueue.QueueBackgroundWorkItemAsync(message);
+                    Finalize = false,
+                });
             }
 
             return action;
@@ -220,14 +304,13 @@ namespace Jurius.CollabEditing.Controllers
             RedisKey[] keys = new RedisKey[]
             {
                 action.RoomName,
-                action.RoomName + CollaborativeEditingHelper.RevisionInfoSuffix,
+                action.RoomName + CollaborativeEditingHelper.OperationOffsetSuffix,
             };
 
             RedisValue[] values = new RedisValue[]
             {
                 JsonConvert.SerializeObject(action),
                 (version - 1).ToString(),
-                CollaborativeEditingHelper.SaveThreshold.ToString(),
             };
 
             await database.ScriptEvaluateAsync(CollaborativeEditingHelper.UpdateRecord, keys, values);
@@ -238,13 +321,12 @@ namespace Jurius.CollabEditing.Controllers
             RedisKey[] keys = new RedisKey[]
             {
                 roomName,
-                roomName + CollaborativeEditingHelper.RevisionInfoSuffix,
+                roomName + CollaborativeEditingHelper.OperationOffsetSuffix,
             };
 
             RedisValue[] values = new RedisValue[]
             {
                 startIndex.ToString(),
-                CollaborativeEditingHelper.SaveThreshold.ToString(),
             };
 
             RedisResult[] upcomingActions = (RedisResult[])await database.ScriptEvaluateAsync(

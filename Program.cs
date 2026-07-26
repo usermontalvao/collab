@@ -57,6 +57,10 @@ builder.Services.AddHostedService<QueuedHostedService>();
 builder.Services.AddHttpClient<INextcloudStorage, NextcloudStorage>();
 builder.Services.AddHttpClient<ISupabaseTokenValidator, SupabaseTokenValidator>();
 
+// Caminho único de gravação no Nextcloud: usado pelo botão Salvar (síncrono) e
+// pela fila de background (corte por excesso de operações / sala vazia).
+builder.Services.AddScoped<IRoomPersistence, RoomPersistence>();
+
 var app = builder.Build();
 
 // Página inicial de demonstração (wwwroot/index.html).
@@ -114,3 +118,9 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 }
 
 app.Run();
+
+/// <summary>
+/// Torna a classe gerada pelos top-level statements visível para os testes
+/// (WebApplicationFactory&lt;Program&gt;). Não muda nada em produção.
+/// </summary>
+public partial class Program { }

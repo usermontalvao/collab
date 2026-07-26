@@ -17,7 +17,11 @@ namespace Jurius.CollabEditing.Controllers
     [ApiController]
     public class DiagnosticsController : ControllerBase
     {
-        private static readonly DateTime StartedAt = DateTime.UtcNow;
+        // Hora de início do PROCESSO, não do primeiro acesso a esta página: um
+        // campo estático só é inicializado quando o primeiro pedido chega, e o
+        // painel mostrava "no ar há 0 s" para um serviço rodando há horas.
+        private static readonly DateTime StartedAt =
+            Process.GetCurrentProcess().StartTime.ToUniversalTime();
 
         private readonly IConnectionMultiplexer _redis;
         private readonly IConfiguration _config;

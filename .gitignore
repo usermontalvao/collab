@@ -1,0 +1,11 @@
+# Segredos — nunca subir
+.env
+
+# Build .NET
+bin/
+obj/
+*.user
+
+# SO
+.DS_Store
+Thumbs.db

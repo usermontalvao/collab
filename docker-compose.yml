@@ -1,0 +1,41 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: collab-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - collab-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    # Sem porta publicada: só o serviço de co-edição fala com ele, pela rede interna.
+
+  collab:
+    build: .
+    container_name: collab-editing
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      ConnectionStrings__RedisConnectionString: "redis:6379"
+      Cors__AllowedOrigins: "${COLLAB_ALLOWED_ORIGINS:-https://jurius.com.br,https://www.jurius.com.br}"
+      Auth__Require: "${COLLAB_AUTH_REQUIRE:-true}"
+      Demo__Enabled: "${COLLAB_DEMO_ENABLED:-true}"
+      Supabase__Url: "${SUPABASE_URL}"
+      Supabase__AnonKey: "${SUPABASE_ANON_KEY}"
+      Nextcloud__BaseUrl: "${NEXTCLOUD_BASE_URL}"
+      Nextcloud__User: "${NEXTCLOUD_USER}"
+      Nextcloud__Password: "${NEXTCLOUD_PASSWORD}"
+      Syncfusion__LicenseKey: "${SYNCFUSION_LICENSE_KEY}"
+    ports:
+      # 54873: porta alta e fora do caminho — não bate com 9000 (portainer),
+      # 8080 (evolution), 8082 (typebot), 8083 (bot), 8084 (email),
+      # 42811 (docs) nem 38427 (nextcloud). Aponte o túnel da Cloudflare aqui.
+      - "127.0.0.1:54873:8080"
+
+volumes:
+  collab-redis:

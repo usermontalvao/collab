@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>Co-edição Jurius — status do serviço</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #171a21; --line: #262b36; --text: #e7eaf0;
+    --muted: #99a1b3; --ok: #34d399; --warn: #fbbf24; --bad: #f87171; --accent: #60a5fa;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f4f6fa; --card:#fff; --line:#e3e7ef; --text:#131722; --muted:#5b6478; --accent:#2563eb; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 32px 20px 64px;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px; padding: 5px 12px;
+    border-radius: 999px; font-size: 13px; font-weight: 600;
+    border: 1px solid var(--line); background: var(--card);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 0 4px rgba(52,211,153,.18); }
+  .dot.bad { background: var(--bad); box-shadow: 0 0 0 4px rgba(248,113,113,.18); }
+  .dot.warn { background: var(--warn); box-shadow: 0 0 0 4px rgba(251,191,36,.18); }
+  .grid { display: grid; gap: 14px; margin-top: 22px; }
+  .cards { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+  .metrics { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; }
+  .card h3 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+  .card .val { font-size: 26px; font-weight: 700; }
+  .card .note { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0; }
+  .row + .row { border-top: 1px dashed var(--line); }
+  .row .name { font-weight: 600; font-size: 14px; }
+  .row .detail { color: var(--muted); font-size: 12px; }
+  section { margin-top: 30px; }
+  section > h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin: 0 0 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--line); }
+  td.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 18px 10px; text-align: center; }
+  button {
+    font: inherit; font-weight: 600; font-size: 13px; cursor: pointer;
+    background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 9px 16px;
+  }
+  button:disabled { opacity: .55; cursor: default; }
+  .log { max-height: 320px; overflow: auto; }
+  .tag {
+    display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px;
+    font-weight: 600; border: 1px solid var(--line); color: var(--muted);
+  }
+  .scroll { overflow-x: auto; }
+  footer { margin-top: 40px; color: var(--muted); font-size: 12px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div style="flex:1 1 260px">
+      <h1>Co-edição Jurius</h1>
+      <div class="sub">Serviço que deixa duas pessoas editarem o mesmo documento ao mesmo tempo.</div>
+    </div>
+    <span class="pill"><span class="dot" id="statusDot"></span><span id="statusText">verificando…</span></span>
+    <span class="pill mono" id="uptime">—</span>
+  </header>
+
+  <div class="grid cards">
+    <div class="card">
+      <h3>Componentes</h3>
+      <div id="components"><div class="empty">carregando…</div></div>
+    </div>
+    <div class="card">
+      <h3>Tempo real (WebSocket)</h3>
+      <div class="row"><span class="name" id="wsState">testando…</span></div>
+      <div class="note" id="wsDetail">Prova que o WebSocket atravessa o túnel da Cloudflare.</div>
+    </div>
+    <div class="card">
+      <h3>Motor de documentos</h3>
+      <div id="selftestResult" class="note">Monta um .docx, abre e converte — igual ao que acontece ao abrir uma petição.</div>
+      <div style="margin-top:12px"><button id="selftestBtn">Rodar teste</button></div>
+    </div>
+  </div>
+
+  <section>
+    <h2>Atividade agora</h2>
+    <div class="grid metrics">
+      <div class="card"><h3>Documentos abertos</h3><div class="val" id="mRooms">—</div><div class="note">salas com gente dentro</div></div>
+      <div class="card"><h3>Pessoas editando</h3><div class="val" id="mPeople">—</div><div class="note">somando todas as salas</div></div>
+      <div class="card"><h3>Edições recebidas</h3><div class="val" id="mOps">—</div><div class="note">desde que o serviço subiu</div></div>
+      <div class="card"><h3>Gravações no Nextcloud</h3><div class="val" id="mSaves">—</div><div class="note" id="mSavesNote">—</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Documentos em edição</h2>
+    <div class="card scroll">
+      <table>
+        <thead><tr><th>Sala</th><th>Pessoas</th><th>Edições na fila</th><th>Versão</th></tr></thead>
+        <tbody id="roomsBody"><tr><td colspan="4" class="empty">nenhum documento aberto no momento</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Últimos acontecimentos</h2>
+    <div class="card log scroll">
+      <table>
+        <thead><tr><th>Quando</th><th>O quê</th><th>Sala</th><th>Quem</th><th>Detalhe</th></tr></thead>
+        <tbody id="eventsBody"><tr><td colspan="5" class="empty">nada ainda — abra um documento no CRM</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    Painel público de propósito: mostra contadores e horários, nunca nome de cliente, caminho de arquivo
+    ou conteúdo de documento. Nomes aparecem só como iniciais. Para desligar esta página e o teste de
+    WebSocket, use <code>Demo__Enabled=false</code>. Atualiza sozinho a cada 4 segundos.
+  </footer>
+</div>
+
+<script src="/signalr.min.js"></script>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+
+  function fmtTime(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    return isNaN(d) ? '—' : d.toLocaleTimeString('pt-BR');
+  }
+
+  function fmtUptime(seconds) {
+    if (seconds == null) return '—';
+    var h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60);
+    if (h > 0) return 'no ar há ' + h + 'h ' + m + 'min';
+    if (m > 0) return 'no ar há ' + m + 'min';
+    return 'no ar há ' + seconds + 's';
+  }
+
+  function componentRow(name, ok, detail) {
+    return '<div class="row"><span class="name"><span class="dot ' + (ok ? 'ok' : 'bad') +
+      '" style="display:inline-block;margin-right:8px"></span>' + name +
+      '</span><span class="detail">' + detail + '</span></div>';
+  }
+
+  function esc(value) {
+    return String(value == null ? '' : value).replace(/[<>&"]/g, function (c) {
+      return { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c];
+    });
+  }
+
+  function loadStatus() {
+    return fetch('/api/diagnostics').then(function (r) { return r.json(); }).then(function (d) {
+      var healthy = d.status === 'ok';
+      $('statusDot').className = 'dot ' + (healthy ? 'ok' : 'bad');
+      $('statusText').textContent = healthy ? 'serviço no ar' : 'serviço degradado';
+      $('uptime').textContent = fmtUptime(d.uptimeSeconds);
+
+      var html = '';
+      html += componentRow('Redis', d.redis.ok, d.redis.ok ? d.redis.latencyMs + ' ms' : esc(d.redis.detail));
+      html += componentRow('Nextcloud', d.nextcloud.ok,
+        d.nextcloud.configured ? (d.nextcloud.ok ? d.nextcloud.latencyMs + ' ms' : esc(d.nextcloud.detail)) : 'não configurado');
+      html += componentRow('Licença Syncfusion', d.license.configured, d.license.configured ? 'registrada' : 'ausente');
+      html += componentRow('Token exigido', d.auth.required, d.auth.required ? 'sim (Supabase)' : 'NÃO — só para ambiente fechado');
+      $('components').innerHTML = html;
+      return d;
+    }).catch(function () {
+      $('statusDot').className = 'dot bad';
+      $('statusText').textContent = 'sem resposta';
+      $('components').innerHTML = '<div class="empty">não foi possível falar com o serviço</div>';
+    });
+  }
+
+  function loadActivity() {
+    return fetch('/api/diagnostics/activity').then(function (r) { return r.json(); }).then(function (d) {
+      $('mRooms').textContent = d.totals.rooms;
+      $('mPeople').textContent = d.totals.people;
+      $('mOps').textContent = d.totals.operations;
+      $('mSaves').textContent = d.totals.saves;
+      $('mSavesNote').textContent = d.lastSaveAt
+        ? 'última às ' + fmtTime(d.lastSaveAt)
+        : (d.totals.pendingOperations + ' edições na fila');
+
+      var rows = (d.rooms || []).map(function (room) {
+        return '<tr><td class="mono">' + esc(room.room) + '</td><td>' + room.people +
+          '</td><td>' + room.pendingOperations + '</td><td>' + room.version + '</td></tr>';
+      }).join('');
+      $('roomsBody').innerHTML = rows || '<tr><td colspan="4" class="empty">nenhum documento aberto no momento</td></tr>';
+
+      var events = (d.events || []).map(function (ev) {
+        return '<tr><td class="mono">' + fmtTime(ev.at) + '</td><td><span class="tag">' + esc(ev.type) +
+          '</span></td><td class="mono">' + esc(ev.room) + '</td><td>' + esc(ev.who) +
+          '</td><td class="detail">' + esc(ev.detail) + '</td></tr>';
+      }).join('');
+      $('eventsBody').innerHTML = events || '<tr><td colspan="5" class="empty">nada ainda — abra um documento no CRM</td></tr>';
+    }).catch(function () { /* o status já avisa quando o serviço cai */ });
+  }
+
+  // Ping de verdade no hub: se isto acende, WebSocket passa pelo túnel.
+  function testWebSocket() {
+    if (!window.signalR) {
+      $('wsState').innerHTML = '<span class="dot warn" style="display:inline-block;margin-right:8px"></span>biblioteca não carregou';
+      return;
+    }
+    var connection = new signalR.HubConnectionBuilder().withUrl('/demohub').build();
+    connection.on('pong', function (data) {
+      $('wsState').innerHTML = '<span class="dot ok" style="display:inline-block;margin-right:8px"></span>conectado';
+      $('wsDetail').textContent = 'resposta do servidor às ' + fmtTime(data.serverTime) +
+        ' · conexão ' + String(data.connectionId).slice(0, 8);
+      setTimeout(function () { connection.stop(); }, 500);
+    });
+    connection.start().then(function () {
+      return connection.send('Ping', 'olá do painel');
+    }).catch(function (err) {
+      $('wsState').innerHTML = '<span class="dot bad" style="display:inline-block;margin-right:8px"></span>não conectou';
+      $('wsDetail').textContent = 'WebSocket bloqueado no caminho (' + (err && err.message ? err.message : 'erro') + ')';
+    });
+  }
+
+  $('selftestBtn').addEventListener('click', function () {
+    var btn = this;
+    btn.disabled = true;
+    $('selftestResult').textContent = 'rodando…';
+    fetch('/api/diagnostics/selftest', { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var html = (d.steps || []).map(function (s) {
+          return '<div class="row"><span class="name"><span class="dot ' + (s.ok ? 'ok' : 'bad') +
+            '" style="display:inline-block;margin-right:8px"></span>' + esc(s.step) +
+            '</span><span class="detail">' + esc(s.detail) + '</span></div>';
+        }).join('');
+        html += '<div class="note" style="margin-top:8px">' +
+          (d.ok ? 'motor de documentos funcionando' : 'o motor falhou — veja os logs do container') +
+          ' · ' + d.elapsedMs + ' ms</div>';
+        $('selftestResult').innerHTML = html;
+      })
+      .catch(function () { $('selftestResult').textContent = 'não foi possível rodar o teste'; })
+      .finally(function () { btn.disabled = false; });
+  });
+
+  loadStatus();
+  loadActivity();
+  testWebSocket();
+  setInterval(function () { loadStatus(); loadActivity(); }, 4000);
+})();
+</script>
+</body>
+</html>

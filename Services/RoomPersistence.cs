@@ -37,7 +37,7 @@ namespace Jurius.CollabEditing.Services
     public class RoomPersistence : IRoomPersistence
     {
         /// <summary>Uma gravação por sala de cada vez. Duas em paralelo gravariam a mesma operação duas vezes.</summary>
-        private static readonly TimeSpan LockTtl = TimeSpan.FromMinutes(3);
+        private static readonly TimeSpan LockTtl = TimeSpan.FromMinutes(15);
         private static readonly TimeSpan LockWait = TimeSpan.FromSeconds(90);
         private static readonly TimeSpan LockPoll = TimeSpan.FromMilliseconds(120);
 
@@ -111,9 +111,16 @@ namespace Jurius.CollabEditing.Services
             DocumentSaveSnapshot documentSnapshot,
             CancellationToken cancellationToken)
         {
-            if (string.IsNullOrWhiteSpace(sourcePath))
+            string registeredSource =
+                await database.StringGetAsync(roomName + CollaborativeEditingHelper.SourceInfoSuffix);
+            if (!string.IsNullOrWhiteSpace(registeredSource))
             {
-                sourcePath = await database.StringGetAsync(roomName + CollaborativeEditingHelper.SourceInfoSuffix);
+                if (!string.IsNullOrWhiteSpace(sourcePath) &&
+                    !string.Equals(sourcePath, registeredSource, StringComparison.Ordinal))
+                {
+                    throw new RoomSourceConflictException();
+                }
+                sourcePath = registeredSource;
             }
 
             // 1) Foto do pendente. Mesma leitura atômica do ImportFile.
@@ -157,8 +164,8 @@ namespace Jurius.CollabEditing.Services
                     "Sala {Room}: nada pendente para gravar (versão {Version}, final {Final}).",
                     roomName, version, finalize);
 
-                if (finalize) await ClearRoomAsync(database, roomName);
-                outcome.StillPending = 0;
+                outcome.StillPending = await TrimPersistedOperationsAsync(
+                    database, roomName, processing.Count, pending.Count, finalize);
                 await NotifyRoomSavedAsync(roomName, outcome, finalize, cancellationToken);
                 return outcome;
             }
@@ -204,26 +211,11 @@ namespace Jurius.CollabEditing.Services
             outcome.Uploaded = true;
             outcome.Verified = true;
 
-            // 3) Remove das filas exatamente o que foi aplicado.
-            if (finalize)
-            {
-                await ClearRoomAsync(database, roomName);
-                outcome.StillPending = 0;
-            }
-            else
-            {
-                var trimmed = (RedisResult[])await database.ScriptEvaluateAsync(
-                    CollaborativeEditingHelper.TrimPersistedOperations,
-                    new RedisKey[]
-                    {
-                        roomName,
-                        roomName + CollaborativeEditingHelper.ActionsToRemoveSuffix,
-                        roomName + CollaborativeEditingHelper.OperationOffsetSuffix,
-                    },
-                    new RedisValue[] { processing.Count.ToString(), pending.Count.ToString() });
-
-                outcome.StillPending = long.Parse(trimmed[0].ToString());
-            }
+            // 3) Remove das filas exatamente o que foi aplicado. Inclusive na
+            // gravação final: uma operação ou reabertura que tenha ocorrido durante
+            // o upload impede atomicamente que a sala seja apagada.
+            outcome.StillPending = await TrimPersistedOperationsAsync(
+                database, roomName, processing.Count, pending.Count, finalize);
 
             _activity.CountSave(actions.Count);
             _activity.Record("gravou no Nextcloud", roomName, null,
@@ -259,6 +251,7 @@ namespace Jurius.CollabEditing.Services
                     operations = outcome.Operations,
                     stillPending = outcome.StillPending,
                     uploaded = outcome.Uploaded,
+                    verified = outcome.Verified,
                     savedAt = outcome.SavedAt,
                 }, cancellationToken);
             }
@@ -412,16 +405,33 @@ namespace Jurius.CollabEditing.Services
             }
         }
 
-        private static async Task ClearRoomAsync(IDatabase database, string roomName)
+        private static async Task<long> TrimPersistedOperationsAsync(
+            IDatabase database,
+            string roomName,
+            int processingCount,
+            int pendingCount,
+            bool finalize)
         {
-            await database.KeyDeleteAsync(new RedisKey[]
-            {
-                roomName,
-                roomName + CollaborativeEditingHelper.ActionsToRemoveSuffix,
-                roomName + CollaborativeEditingHelper.OperationOffsetSuffix,
-                roomName + CollaborativeEditingHelper.VersionInfoSuffix,
-                roomName + CollaborativeEditingHelper.SourceInfoSuffix,
-            });
+            var trimmed = (RedisResult[])await database.ScriptEvaluateAsync(
+                CollaborativeEditingHelper.TrimPersistedOperations,
+                new RedisKey[]
+                {
+                    roomName,
+                    roomName + CollaborativeEditingHelper.ActionsToRemoveSuffix,
+                    roomName + CollaborativeEditingHelper.OperationOffsetSuffix,
+                    roomName + CollaborativeEditingHelper.UserInfoSuffix,
+                    roomName + CollaborativeEditingHelper.VersionInfoSuffix,
+                    roomName + CollaborativeEditingHelper.SourceInfoSuffix,
+                },
+                new RedisValue[]
+                {
+                    processingCount.ToString(),
+                    pendingCount.ToString(),
+                    finalize ? "1" : "0",
+                    ((long)UnsavedRoomTtl.TotalSeconds).ToString(),
+                });
+
+            return long.Parse(trimmed[0].ToString());
         }
 
         private static async Task<bool> AcquireLockAsync(

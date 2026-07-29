@@ -63,27 +63,39 @@ public class CoedicaoTests
         return JsonConvert.DeserializeObject<ActionInfo>(await response.Content.ReadAsStringAsync());
     }
 
-    private static async Task<SaveOutcome> Salvar(HttpClient client, string sala)
-    {
-        var snapshotResponse = await client.PostAsJsonAsync("/api/CollaborativeEditing/ImportFile", new
-        {
-            roomName = sala,
-            filePath = CaminhoDocumento,
-            fileName = "peticao.docx",
-        });
-        snapshotResponse.EnsureSuccessStatusCode();
-        var snapshot = JsonConvert.DeserializeObject<DocumentContent>(
-            await snapshotResponse.Content.ReadAsStringAsync());
+    /// <summary>Versão corrente da sala, do jeito que o editor a conhece.</summary>
+    private static async Task<int> VersaoDaSala(HttpClient client, string sala) =>
+        await AbrirDocumento(client, sala);
 
-        var response = await client.PostAsJsonAsync("/api/CollaborativeEditing/SaveToSource", new
-        {
-            roomName = sala,
-            sfdt = snapshot.sfdt,
-            version = snapshot.version,
-        });
+    /// <summary>
+    /// O botão Salvar do editor: manda o DOCUMENTO INTEIRO que está na tela.
+    ///
+    /// O documento aqui é montado do ZERO com o texto esperado, de propósito: nada
+    /// que o serviço produz entra nesta conta. Assim, quando o teste encontra o
+    /// texto no arquivo do Nextcloud, é porque o que foi enviado foi de fato
+    /// gravado — e não porque as duas pontas repetiram o mesmo engano.
+    ///
+    /// (Era exatamente esse engano: o snapshot vinha do ImportFile, que devolve as
+    /// operações PENDURADAS em `iOps` para o navegador aplicar. O DocIO as ignora,
+    /// e o arquivo subia com o texto antigo.)
+    /// </summary>
+    private static async Task<SaveOutcome> Salvar(HttpClient client, string sala, string textoNaTela)
+    {
+        var versao = await VersaoDaSala(client, sala);
+        var response = await EnviarSnapshot(
+            client, sala, DocumentFactory.BrowserSnapshotOf(textoNaTela), versao);
         response.EnsureSuccessStatusCode();
         return JsonConvert.DeserializeObject<SaveOutcome>(await response.Content.ReadAsStringAsync());
     }
+
+    private static Task<HttpResponseMessage> EnviarSnapshot(
+        HttpClient client, string sala, string sfdt, int versao) =>
+        client.PostAsJsonAsync("/api/CollaborativeEditing/SaveToSource", new
+        {
+            roomName = sala,
+            sfdt,
+            version = versao,
+        });
 
     /// <summary>Espera uma condição sem `Thread.Sleep` fixo (teste lento e instável).</summary>
     private static async Task<bool> Ate(Func<bool> condicao, int timeoutMs = 8000)
@@ -284,15 +296,51 @@ public class CoedicaoTests
         // "Ola" + "ZZ" no fim (deslocamento 1-based: depois de 3 letras, 4).
         await EnviarOperacao(client, DocumentFactory.Insert(sala, "conexao-da-ana", versao, "ZZ", offset: 4));
 
-        var resultado = await Salvar(client, sala);
+        var resultado = await Salvar(client, sala, "OlaZZ");
 
         Assert.True(resultado.Uploaded, "O serviço respondeu sem ter enviado nada ao Nextcloud.");
+        Assert.True(resultado.Verified, "O serviço confirmou sem ter RELIDO o arquivo do Nextcloud.");
         Assert.Equal(1, resultado.Operations);
         Assert.Equal(0, resultado.StillPending);
         Assert.Equal(1, servico.Storage.UploadCount);
 
         var texto = DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento));
         Assert.Contains("OlaZZ", texto);
+
+        // O caminho gravado tem de ser EXATAMENTE o caminho que será reaberto.
+        Assert.Equal(new[] { CaminhoDocumento }, servico.Storage.UploadedPaths);
+        Assert.Contains(CaminhoDocumento, servico.Storage.DownloadedPaths);
+    }
+
+    [SkippableFact(DisplayName = "Salvar nunca troca o caminho registrado da sala")]
+    public async Task SalvarRecusaCaminhoDiferenteDoAberto()
+    {
+        using var servico = NovoServico();
+        var client = servico.CreateClient();
+        const string sala = "sala_caminho";
+
+        var versao = await AbrirDocumento(client, sala);
+        var operacao = await EnviarOperacao(
+            client,
+            DocumentFactory.Insert(sala, "conexao-da-ana", versao, "ZZ", offset: 4));
+
+        var response = await client.PostAsJsonAsync(
+            "/api/CollaborativeEditing/SaveToSource",
+            new
+            {
+                roomName = sala,
+                filePath = "Clientes/Outro/documento.docx",
+                sfdt = DocumentFactory.BrowserSnapshotOf("OlaZZ"),
+                version = operacao.Version,
+            });
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        Assert.Equal(0, servico.Storage.UploadCount);
+
+        // A recusa não toca na fila nem no arquivo certo.
+        var resultado = await Salvar(client, sala, "OlaZZ");
+        Assert.True(resultado.Verified);
+        Assert.Contains("OlaZZ", DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento)));
     }
 
     [SkippableFact(DisplayName = "Salvar recusa snapshot defasado e preserva as operações")]
@@ -306,31 +354,25 @@ public class CoedicaoTests
         var primeira = await EnviarOperacao(
             client, DocumentFactory.Insert(sala, "conexao-da-ana", versao, "A", offset: 4));
 
-        var snapshotResponse = await client.PostAsJsonAsync("/api/CollaborativeEditing/ImportFile", new
-        {
-            roomName = sala,
-            filePath = CaminhoDocumento,
-            fileName = "peticao.docx",
-        });
-        snapshotResponse.EnsureSuccessStatusCode();
-        var snapshotAntigo = JsonConvert.DeserializeObject<DocumentContent>(
-            await snapshotResponse.Content.ReadAsStringAsync());
+        // A tela deste navegador está em "OlaA" — e é essa a versão que ele conhece.
+        var versaoAntiga = primeira.Version;
+        var snapshotAntigo = DocumentFactory.BrowserSnapshotOf("OlaA");
 
+        // Enquanto ele preparava o documento, chegou a edição de outra pessoa.
         await EnviarOperacao(
-            client, DocumentFactory.Insert(sala, "conexao-da-ana", primeira.Version, "B", offset: 5));
+            client, DocumentFactory.Insert(sala, "conexao-do-bruno", primeira.Version, "B", offset: 5));
 
-        var response = await client.PostAsJsonAsync("/api/CollaborativeEditing/SaveToSource", new
-        {
-            roomName = sala,
-            sfdt = snapshotAntigo.sfdt,
-            version = snapshotAntigo.version,
-        });
+        var response = await EnviarSnapshot(client, sala, snapshotAntigo, versaoAntiga);
 
+        // Gravar o "OlaA" agora APAGARIA o "B" da outra pessoa.
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
         Assert.Equal(0, servico.Storage.UploadCount);
 
-        var resultado = await Salvar(client, sala);
+        // A fila fica intacta: sincronizando e salvando de novo, nada se perde.
+        var resultado = await Salvar(client, sala, "OlaAB");
         Assert.True(resultado.Uploaded);
+        Assert.True(resultado.Verified);
+        Assert.Equal(2, resultado.Operations);
         Assert.Contains("OlaAB", DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento)));
     }
 
@@ -345,23 +387,11 @@ public class CoedicaoTests
         await EnviarOperacao(
             client, DocumentFactory.Insert(sala, "conexao-da-ana", versao, "ZZ", offset: 4));
 
+        // WebDAV respondendo 2xx sem substituir o arquivo.
         servico.Storage.IgnoreUploads = true;
-        var snapshotResponse = await client.PostAsJsonAsync("/api/CollaborativeEditing/ImportFile", new
-        {
-            roomName = sala,
-            filePath = CaminhoDocumento,
-            fileName = "peticao.docx",
-        });
-        snapshotResponse.EnsureSuccessStatusCode();
-        var snapshot = JsonConvert.DeserializeObject<DocumentContent>(
-            await snapshotResponse.Content.ReadAsStringAsync());
 
-        var failed = await client.PostAsJsonAsync("/api/CollaborativeEditing/SaveToSource", new
-        {
-            roomName = sala,
-            sfdt = snapshot.sfdt,
-            version = snapshot.version,
-        });
+        var failed = await EnviarSnapshot(
+            client, sala, DocumentFactory.BrowserSnapshotOf("OlaZZ"), await VersaoDaSala(client, sala));
 
         Assert.Equal(HttpStatusCode.InternalServerError, failed.StatusCode);
         Assert.DoesNotContain("OlaZZ", DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento)));
@@ -369,8 +399,9 @@ public class CoedicaoTests
         // A fila só é aparada depois da verificação. Corrigido o armazenamento,
         // a mesma edição continua disponível e pode ser gravada de verdade.
         servico.Storage.IgnoreUploads = false;
-        var resultado = await Salvar(client, sala);
+        var resultado = await Salvar(client, sala, "OlaZZ");
         Assert.True(resultado.Uploaded);
+        Assert.Equal(1, resultado.Operations);
         Assert.Contains("OlaZZ", DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento)));
     }
 
@@ -403,7 +434,7 @@ public class CoedicaoTests
         await EnviarOperacao(client, DocumentFactory.Insert(sala, "conexao-da-ana", versao, "ZZ", offset: 4));
 
         // Ana clica em Salvar; Bruno não fez nada.
-        var resultado = await Salvar(client, sala);
+        var resultado = await Salvar(client, sala, "OlaZZ");
         Assert.True(resultado.Uploaded);
 
         Assert.True(
@@ -416,6 +447,9 @@ public class CoedicaoTests
         System.Text.Json.JsonElement aviso;
         lock (avisosParaBruno) aviso = avisosParaBruno[0];
         Assert.True(aviso.GetProperty("uploaded").GetBoolean());
+        Assert.True(
+            aviso.GetProperty("verified").GetBoolean(),
+            "O aviso só pode liberar “Salvo” depois da releitura do Nextcloud.");
         Assert.Equal(0, aviso.GetProperty("stillPending").GetInt64());
         Assert.Equal(1, aviso.GetProperty("operations").GetInt32());
     }
@@ -428,9 +462,10 @@ public class CoedicaoTests
         const string sala = "sala_vazia";
 
         await AbrirDocumento(client, sala);
-        var resultado = await Salvar(client, sala);
+        var resultado = await Salvar(client, sala, TextoInicial);
 
         Assert.False(resultado.Uploaded);
+        Assert.False(resultado.Verified);
         Assert.Equal(0, resultado.Operations);
         Assert.Equal(0, servico.Storage.UploadCount);
     }
@@ -445,9 +480,18 @@ public class CoedicaoTests
         var versao = await AbrirDocumento(client, sala);
         await EnviarOperacao(client, DocumentFactory.Insert(sala, "conexao-da-ana", versao, "ZZ", offset: 4));
 
-        var primeira = Salvar(client, sala);
-        var segunda = Salvar(client, sala);
-        var resultados = await Task.WhenAll(primeira, segunda);
+        // Os dois navegadores estão na mesma versão e com o mesmo texto na tela.
+        var versaoNaTela = await VersaoDaSala(client, sala);
+        var naTela = DocumentFactory.BrowserSnapshotOf("OlaZZ");
+
+        async Task<SaveOutcome> SalvarAgora()
+        {
+            var resposta = await EnviarSnapshot(client, sala, naTela, versaoNaTela);
+            resposta.EnsureSuccessStatusCode();
+            return JsonConvert.DeserializeObject<SaveOutcome>(await resposta.Content.ReadAsStringAsync());
+        }
+
+        var resultados = await Task.WhenAll(SalvarAgora(), SalvarAgora());
 
         // A operação foi contabilizada UMA vez só, não importa qual das duas
         // gravações chegou primeiro.
@@ -468,15 +512,36 @@ public class CoedicaoTests
         var versao = await AbrirDocumento(client, sala);
         var primeira = await EnviarOperacao(client, DocumentFactory.Insert(sala, "conexao-da-ana", versao, "AA", offset: 4));
 
-        var salvamento = await Salvar(client, sala);
+        // A edição do Bruno entra DENTRO da janela de gravação: depois da foto
+        // atômica da fila e antes de o arquivo terminar de subir. É a janela em que
+        // apagar a chave do Redis (em vez de aparar por quantidade) perderia o "BB".
+        Task<ActionInfo> durante = null;
+        servico.Storage.DuringUpload = () =>
+        {
+            servico.Storage.DuringUpload = null;
+            // A requisição chega durante o upload, mas a operação inteira espera a
+            // mesma trava da gravação. Isto impede fotografar o RPUSH antes do LSET
+            // transformado e impede a migração entre as duas filas no meio do corte.
+            durante = EnviarOperacao(
+                client, DocumentFactory.Insert(sala, "conexao-do-bruno", primeira.Version, "BB", offset: 6));
+            return Task.CompletedTask;
+        };
+
+        var salvamento = await Salvar(client, sala, "OlaAA");
+        Assert.NotNull(durante);
+        var operacaoDurante = await durante;
+        Assert.NotNull(operacaoDurante);
         Assert.Equal(1, salvamento.Operations);
+        // O "BB" NÃO entrou nesta gravação; foi enfileirado logo depois que a
+        // trava saiu e continua pendente — não foi gravado duas vezes nem apagado.
+        Assert.Equal(0, salvamento.StillPending);
+        Assert.Contains("OlaAA", DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento)));
 
-        // Continua digitando DEPOIS do corte: a conta de deslocamento tem de
-        // continuar batendo (era aqui que a fórmula antiga embaralhava o texto).
-        await EnviarOperacao(client, DocumentFactory.Insert(sala, "conexao-da-ana", primeira.Version, "BB", offset: 6));
-
-        var segundoSalvamento = await Salvar(client, sala);
+        // Segunda gravação: a conta de deslocamento tem de continuar batendo (era
+        // aqui que a fórmula antiga embaralhava o texto).
+        var segundoSalvamento = await Salvar(client, sala, "OlaAABB");
         Assert.Equal(1, segundoSalvamento.Operations);
+        Assert.Equal(0, segundoSalvamento.StillPending);
 
         var texto = DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento));
         Assert.Contains("OlaAABB", texto);
@@ -491,7 +556,7 @@ public class CoedicaoTests
 
         var versao = await AbrirDocumento(client, sala);
         await EnviarOperacao(client, DocumentFactory.Insert(sala, "conexao-da-ana", versao, "ZZ", offset: 4));
-        await Salvar(client, sala);
+        await Salvar(client, sala, "OlaZZ");
 
         // ImportFile de novo: o arquivo já tem o "ZZ" e a fila está vazia, então o
         // texto NÃO pode aparecer duas vezes no SFDT devolvido.
@@ -510,6 +575,125 @@ public class CoedicaoTests
 
         Assert.Contains("OlaZZ", texto);
         Assert.DoesNotContain("OlaZZZZ", texto);
+    }
+
+    [SkippableFact(DisplayName = "Documento chegando com as edições PENDURADAS é recusado e a fila é preservada")]
+    public async Task SnapshotComOperacoesPenduradasEhRecusado()
+    {
+        using var servico = NovoServico();
+        var client = servico.CreateClient();
+        const string sala = "sala_penduradas";
+
+        var versao = await AbrirDocumento(client, sala);
+        await EnviarOperacao(client, DocumentFactory.Insert(sala, "conexao-da-ana", versao, "ZZ", offset: 4));
+
+        // O SFDT do ImportFile traz as operações em `iOps`, para o NAVEGADOR
+        // aplicar. Convertê-lo para .docx grava o texto ANTIGO — foi assim que
+        // "Salvo" passou a mentir. O serviço tem de recusar.
+        var doImportFile = await client.PostAsJsonAsync("/api/CollaborativeEditing/ImportFile", new
+        {
+            roomName = sala,
+            filePath = CaminhoDocumento,
+            fileName = "peticao.docx",
+        });
+        doImportFile.EnsureSuccessStatusCode();
+        var conteudo = JsonConvert.DeserializeObject<DocumentContent>(
+            await doImportFile.Content.ReadAsStringAsync());
+
+        var recusa = await EnviarSnapshot(client, sala, conteudo.sfdt, conteudo.version);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, recusa.StatusCode);
+        Assert.Equal(0, servico.Storage.UploadCount);
+        Assert.DoesNotContain("OlaZZ", DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento)));
+
+        // Nada saiu do Redis: o mesmo texto ainda pode ser gravado de verdade.
+        var resultado = await Salvar(client, sala, "OlaZZ");
+        Assert.True(resultado.Uploaded);
+        Assert.Equal(1, resultado.Operations);
+        Assert.Contains("OlaZZ", DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento)));
+    }
+
+    [SkippableFact(DisplayName = "Front antigo (sem o documento no corpo) continua gravando pela fila")]
+    public async Task FrontAntigoSemSnapshotAindaGrava()
+    {
+        using var servico = NovoServico();
+        var client = servico.CreateClient();
+        const string sala = "sala_front_antigo";
+
+        var versao = await AbrirDocumento(client, sala);
+        await EnviarOperacao(client, DocumentFactory.Insert(sala, "conexao-da-ana", versao, "ZZ", offset: 4));
+
+        // É o corpo que o front anterior manda: só a sala. Durante a implantação as
+        // duas versões conversam com o mesmo serviço.
+        var response = await client.PostAsJsonAsync(
+            "/api/CollaborativeEditing/SaveToSource", new { roomName = sala });
+        response.EnsureSuccessStatusCode();
+        var resultado = JsonConvert.DeserializeObject<SaveOutcome>(
+            await response.Content.ReadAsStringAsync());
+
+        Assert.True(resultado.Uploaded);
+        Assert.True(resultado.Verified);
+        Assert.Contains("OlaZZ", DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento)));
+    }
+
+    [SkippableFact(DisplayName = "Documento com tabela, lista, imagem e revisão é gravado inteiro")]
+    public async Task DocumentoRicoEhGravadoInteiro()
+    {
+        using var servico = NovoServico();
+        const string marca = "PeticaoInicial";
+        servico.Storage.Seed(CaminhoDocumento, DocumentFactory.NewRichDocx(marca));
+
+        var client = servico.CreateClient();
+        const string sala = "sala_documento_rico";
+
+        var versao = await AbrirDocumento(client, sala);
+        await EnviarOperacao(
+            client,
+            DocumentFactory.Insert(sala, "conexao-da-ana", versao, "ZZ", offset: marca.Length + 1));
+
+        var naTela = DocumentFactory.BrowserSnapshot(DocumentFactory.NewRichDocx(marca + "ZZ"));
+        var response = await EnviarSnapshot(client, sala, naTela, await VersaoDaSala(client, sala));
+        response.EnsureSuccessStatusCode();
+
+        var gravado = DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento));
+        Assert.Contains(marca + "ZZ", gravado);
+        Assert.Contains("R$ 1.000,00", gravado);
+        Assert.Contains("Primeiro pedido", gravado);
+        Assert.Contains("Trecho com revisão", gravado);
+    }
+
+    [SkippableFact(DisplayName = "Gravação final que FALHA não apaga as operações da sala")]
+    public async Task GravacaoFinalQueFalhaNaoApagaAsOperacoes()
+    {
+        using var servico = NovoServico();
+        var client = servico.CreateClient();
+        const string sala = "sala_final_falha";
+
+        var versao = await AbrirDocumento(client, sala);
+
+        var conexao = await servico.ConnectHubAsync();
+        await conexao.InvokeAsync("JoinGroup", new RoomMemberInfo { RoomName = sala, CurrentUser = "Ana" });
+        await EnviarOperacao(client, DocumentFactory.Insert(sala, "conexao-da-ana", versao, "ZZ", offset: 4));
+
+        // O Nextcloud está fora do ar exatamente quando a última pessoa sai.
+        servico.Storage.FailUploads = true;
+        await conexao.DisposeAsync();
+
+        Assert.True(
+            await Ate(() => servico.Storage.UploadCount > 0),
+            "A saída da última pessoa nem tentou gravar.");
+        Assert.DoesNotContain("OlaZZ", DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento)));
+
+        // A EDIÇÃO NÃO PODE TER SIDO APAGADA junto com a sala: ela é a única cópia
+        // do que foi digitado. Com o armazenamento de volta, reabrir e salvar
+        // recupera o texto.
+        servico.Storage.FailUploads = false;
+        Assert.Equal(versao + 1, await VersaoDaSala(client, sala));
+
+        var resultado = await Salvar(client, sala, "OlaZZ");
+        Assert.True(resultado.Uploaded);
+        Assert.Equal(1, resultado.Operations);
+        Assert.Contains("OlaZZ", DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento)));
     }
 
     // ------------------------------------------------------------ reconexão

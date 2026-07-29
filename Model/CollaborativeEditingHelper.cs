@@ -53,6 +53,18 @@ namespace Jurius.CollabEditing.Model
         /// <summary>Trava de gravação da sala (uma gravação por sala de cada vez).</summary>
         internal static string SaveLockSuffix = "_save_lock";
 
+        /// <summary>
+        /// Registra o caminho uma vez e recusa reutilizar a mesma sala para outro
+        /// arquivo. A comparação e o SET são atômicos e o caminho nunca vai ao log.
+        /// </summary>
+        internal static string RegisterSource = @"
+            local current = redis.call('GET', KEYS[1])
+            if current and current ~= ARGV[1] then
+                return 0
+            end
+            redis.call('SET', KEYS[1], ARGV[1])
+            return 1";
+
         internal static string InsertScript = @"
                 -- Chaves: versão, lista de operações, deslocamento, fila de gravação
                 local versionKey = KEYS[1]
@@ -188,15 +200,30 @@ namespace Jurius.CollabEditing.Model
         /// baixado, montado e enviado ao Nextcloud (segundos), quem está digitando
         /// continua enfileirando operações. Apagar a chave jogaria fora justamente
         /// essas — o texto digitado durante o "Salvando…" sumiria.
-        /// Retorna { operações ainda pendentes na lista, deslocamento novo }.
+        /// KEYS adicionais: usuários da sala, versão e caminho de origem.
+        /// ARGV[3]: 1 para a gravação final, 0 para uma gravação intermediária.
+        /// ARGV[4]: prazo, em segundos, dos metadados de uma sala vazia.
+        ///
+        /// Na gravação final, as chaves de metadados só são removidas se, NESTA
+        /// MESMA execução atômica, não houver operação restante nem usuário na
+        /// sala. Mesmo nesse caso, versão/caminho/deslocamento ficam por prazo
+        /// limitado: uma operação HTTP que já estava em voo quando o último
+        /// WebSocket fechou ainda consegue entrar sem virar uma fila órfã.
+        /// Retorna { total ainda pendente nas duas filas, deslocamento novo,
+        /// sala efetivamente encerrada }.
         /// </summary>
         internal static string TrimPersistedOperations = @"
             local listKey = KEYS[1]
             local processingKey = KEYS[2]
             local offsetKey = KEYS[3]
+            local usersKey = KEYS[4]
+            local versionKey = KEYS[5]
+            local sourceKey = KEYS[6]
 
             local processingCount = tonumber(ARGV[1])
             local listCount = tonumber(ARGV[2])
+            local finalize = tonumber(ARGV[3])
+            local roomTtl = tonumber(ARGV[4])
 
             if processingCount > 0 then
                 redis.call('LTRIM', processingKey, processingCount, -1)
@@ -214,7 +241,18 @@ namespace Jurius.CollabEditing.Model
                 offset = tonumber(offset)
             end
 
-            return {redis.call('LLEN', listKey), offset}";
+            local remaining =
+                redis.call('LLEN', processingKey) + redis.call('LLEN', listKey)
+            local cleared = 0
+
+            if finalize == 1 and remaining == 0 and redis.call('HLEN', usersKey) == 0 then
+                redis.call('EXPIRE', offsetKey, roomTtl)
+                redis.call('EXPIRE', versionKey, roomTtl)
+                redis.call('EXPIRE', sourceKey, roomTtl)
+                cleared = 1
+            end
+
+            return {remaining, offset, cleared}";
 
         /// <summary>Solta a trava só se ela ainda for NOSSA (comparação com o token).</summary>
         internal static string ReleaseLock = @"
@@ -314,6 +352,14 @@ namespace Jurius.CollabEditing.Model
 
         public int RequestedVersion { get; }
         public int CurrentVersion { get; }
+    }
+
+    public class RoomSourceConflictException : Exception
+    {
+        public RoomSourceConflictException()
+            : base("A sala já está vinculada a outro arquivo.")
+        {
+        }
     }
 
     /// <summary>

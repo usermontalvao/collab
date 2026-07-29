@@ -32,6 +32,9 @@ namespace Jurius.CollabEditing.Controllers
     [ApiController]
     public class CollaborativeEditingController : ControllerBase
     {
+        private static readonly TimeSpan RoomLockTtl = TimeSpan.FromMinutes(15);
+        private static readonly TimeSpan RoomLockWait = TimeSpan.FromSeconds(90);
+
         private readonly IBackgroundTaskQueue _saveTaskQueue;
         private readonly IConnectionMultiplexer _redisConnection;
         private readonly IHubContext<DocumentEditorHub> _hubContext;
@@ -74,54 +77,71 @@ namespace Jurius.CollabEditing.Controllers
             try
             {
                 IDatabase database = _redisConnection.GetDatabase();
+                string lockToken = await AcquireRoomLockAsync(
+                    database, param.roomName, HttpContext.RequestAborted);
 
-                // Guarda o arquivo de origem da sala: o salvamento em background só
-                // conhece o nome da sala.
-                await database.StringSetAsync(param.roomName + CollaborativeEditingHelper.SourceInfoSuffix, param.filePath);
-
-                // Versão e operações pendentes na MESMA leitura — ver ImportSnapshot.
-                var snapshot = (RedisResult[])await database.ScriptEvaluateAsync(
-                    CollaborativeEditingHelper.ImportSnapshot,
-                    new RedisKey[]
+                try
+                {
+                    // Guarda o arquivo de origem da sala: o salvamento em background só
+                    // conhece o nome da sala. A mesma sala nunca pode ser redirecionada
+                    // para outro caminho (isso gravaria um arquivo e reabriria outro).
+                    var sourceRegistered = (long)await database.ScriptEvaluateAsync(
+                        CollaborativeEditingHelper.RegisterSource,
+                        new RedisKey[] { param.roomName + CollaborativeEditingHelper.SourceInfoSuffix },
+                        new RedisValue[] { param.filePath });
+                    if (sourceRegistered != 1)
                     {
-                        param.roomName + CollaborativeEditingHelper.VersionInfoSuffix,
-                        param.roomName,
-                        param.roomName + CollaborativeEditingHelper.ActionsToRemoveSuffix,
-                    },
-                    Array.Empty<RedisValue>());
+                        return Conflict("A sala já está vinculada a outro documento.");
+                    }
 
-                int version = int.Parse(snapshot[0].ToString());
-                var actions = new List<ActionInfo>();
-                actions.AddRange(((RedisResult[])snapshot[1])
-                    .Select(value => JsonConvert.DeserializeObject<ActionInfo>(value.ToString())));
-                actions.AddRange(((RedisResult[])snapshot[2])
-                    .Select(value => JsonConvert.DeserializeObject<ActionInfo>(value.ToString())));
+                    // Versão e operações pendentes na MESMA leitura — ver ImportSnapshot.
+                    var snapshot = (RedisResult[])await database.ScriptEvaluateAsync(
+                        CollaborativeEditingHelper.ImportSnapshot,
+                        new RedisKey[]
+                        {
+                            param.roomName + CollaborativeEditingHelper.VersionInfoSuffix,
+                            param.roomName,
+                            param.roomName + CollaborativeEditingHelper.ActionsToRemoveSuffix,
+                        },
+                        Array.Empty<RedisValue>());
 
-                using Stream source = await _storage.DownloadAsync(param.filePath, HttpContext.RequestAborted);
-                WordDocument document = WordDocument.Load(source, FormatType.Docx);
+                    int version = int.Parse(snapshot[0].ToString());
+                    var actions = new List<ActionInfo>();
+                    actions.AddRange(((RedisResult[])snapshot[1])
+                        .Select(value => JsonConvert.DeserializeObject<ActionInfo>(value.ToString())));
+                    actions.AddRange(((RedisResult[])snapshot[2])
+                        .Select(value => JsonConvert.DeserializeObject<ActionInfo>(value.ToString())));
 
-                if (actions.Count > 0)
-                {
-                    document.UpdateActions(actions);
+                    using Stream source = await _storage.DownloadAsync(param.filePath, HttpContext.RequestAborted);
+                    WordDocument document = WordDocument.Load(source, FormatType.Docx);
+
+                    if (actions.Count > 0)
+                    {
+                        document.UpdateActions(actions);
+                    }
+
+                    var content = new DocumentContent
+                    {
+                        // A versão TEM de ser a corrente do servidor. Devolver 0 aqui faria
+                        // quem entra depois pedir de novo operações que já estão aplicadas
+                        // no documento — texto duplicado.
+                        version = version,
+                        sfdt = JsonConvert.SerializeObject(document),
+                    };
+                    document.Dispose();
+
+                    _activity.CountImport();
+                    _activity.Record("abriu documento", param.roomName, null, $"versão {version}");
+                    _logger.LogInformation(
+                        "Sala {Room}: documento aberto na versão {Version} ({Pending} operações pendentes aplicadas).",
+                        param.roomName, version, actions.Count);
+
+                    return Content(JsonConvert.SerializeObject(content), "application/json");
                 }
-
-                var content = new DocumentContent
+                finally
                 {
-                    // A versão TEM de ser a corrente do servidor. Devolver 0 aqui faria
-                    // quem entra depois pedir de novo operações que já estão aplicadas
-                    // no documento — texto duplicado.
-                    version = version,
-                    sfdt = JsonConvert.SerializeObject(document),
-                };
-                document.Dispose();
-
-                _activity.CountImport();
-                _activity.Record("abriu documento", param.roomName, null, $"versão {version}");
-                _logger.LogInformation(
-                    "Sala {Room}: documento aberto na versão {Version} ({Pending} operações pendentes aplicadas).",
-                    param.roomName, version, actions.Count);
-
-                return Content(JsonConvert.SerializeObject(content), "application/json");
+                    await ReleaseRoomLockAsync(database, param.roomName, lockToken);
+                }
             }
             catch (Exception ex)
             {
@@ -253,6 +273,13 @@ namespace Jurius.CollabEditing.Controllers
                     StatusCodes.Status409Conflict,
                     "Chegaram novas edições enquanto o documento era preparado. Sincronize e salve novamente.");
             }
+            catch (RoomSourceConflictException ex)
+            {
+                _logger.LogWarning(ex, "Sala {Room}: tentativa de gravar caminho divergente.", param.roomName);
+                return StatusCode(
+                    StatusCodes.Status422UnprocessableEntity,
+                    "O caminho do documento não corresponde ao arquivo aberto nesta sala.");
+            }
             catch (UnmaterializedSnapshotException ex)
             {
                 // O documento chegou com edições ainda penduradas: convertê-lo
@@ -288,9 +315,62 @@ namespace Jurius.CollabEditing.Controllers
 
         private async Task<ActionInfo> AddOperationsToCache(ActionInfo action)
         {
+            IDatabase database = _redisConnection.GetDatabase();
+            // Inserir, transformar e substituir a operação na fila é UMA unidade.
+            // A gravação usa a mesma trava, portanto nunca fotografa a entrada entre
+            // o RPUSH bruto e o LSET já transformado, nem permite que o corte de
+            // limite mova operações entre filas no meio de um upload.
+            string lockToken = await AcquireRoomLockAsync(
+                database, action.RoomName, HttpContext.RequestAborted);
+
+            try
+            {
+                return await AddOperationsToCacheLocked(action, database);
+            }
+            finally
+            {
+                await ReleaseRoomLockAsync(database, action.RoomName, lockToken);
+            }
+        }
+
+        private static async Task<string> AcquireRoomLockAsync(
+            IDatabase database,
+            string roomName,
+            CancellationToken cancellationToken)
+        {
+            string lockKey = roomName + CollaborativeEditingHelper.SaveLockSuffix;
+            string lockToken = Guid.NewGuid().ToString("N");
+            DateTime deadline = DateTime.UtcNow + RoomLockWait;
+
+            while (!await database.StringSetAsync(
+                lockKey, lockToken, RoomLockTtl, When.NotExists))
+            {
+                if (DateTime.UtcNow >= deadline)
+                {
+                    throw new TimeoutException(
+                        "A sala ainda está concluindo outra operação.");
+                }
+                await Task.Delay(TimeSpan.FromMilliseconds(40), cancellationToken);
+            }
+
+            return lockToken;
+        }
+
+        private static Task<RedisResult> ReleaseRoomLockAsync(
+            IDatabase database,
+            string roomName,
+            string lockToken) =>
+            database.ScriptEvaluateAsync(
+                CollaborativeEditingHelper.ReleaseLock,
+                new RedisKey[] { roomName + CollaborativeEditingHelper.SaveLockSuffix },
+                new RedisValue[] { lockToken });
+
+        private async Task<ActionInfo> AddOperationsToCacheLocked(
+            ActionInfo action,
+            IDatabase database)
+        {
             int clientVersion = action.Version;
 
-            IDatabase database = _redisConnection.GetDatabase();
             RedisKey[] keys = new RedisKey[]
             {
                 action.RoomName + CollaborativeEditingHelper.VersionInfoSuffix,

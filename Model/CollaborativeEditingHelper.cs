@@ -251,6 +251,13 @@ namespace Jurius.CollabEditing.Model
         /// <summary>`true` quando o arquivo foi realmente enviado ao Nextcloud.</summary>
         public bool Uploaded { get; set; }
 
+        /// <summary>
+        /// `true` quando o arquivo foi RELIDO do Nextcloud depois da gravação e os
+        /// bytes conferiram. Um PUT 2xx não prova nada — é este campo, e só ele,
+        /// que autoriza a tela a dizer "Salvo".
+        /// </summary>
+        public bool Verified { get; set; }
+
         /// <summary>Quantas operações continuaram pendentes (chegaram durante a gravação).</summary>
         public long StillPending { get; set; }
 
@@ -275,6 +282,38 @@ namespace Jurius.CollabEditing.Model
         /// quando a chave da sala expirou.
         /// </summary>
         public string filePath { get; set; }
+
+        /// <summary>
+        /// Snapshot SFDT completo que está visível no editor no instante do
+        /// salvamento. O botão Salvar usa este conteúdo em vez de tentar reconstruir
+        /// o documento repetindo operações no motor server-side da Syncfusion.
+        /// </summary>
+        public string sfdt { get; set; }
+
+        /// <summary>
+        /// Versão da sala já incorporada em <see cref="sfdt"/>. O servidor só grava
+        /// o snapshot quando ela coincide com a versão atômica do Redis.
+        /// </summary>
+        public int? version { get; set; }
+    }
+
+    public class DocumentSaveSnapshot
+    {
+        public string Sfdt { get; set; }
+        public int Version { get; set; }
+    }
+
+    public class RoomVersionConflictException : Exception
+    {
+        public RoomVersionConflictException(int requestedVersion, int currentVersion)
+            : base($"O editor está na versão {requestedVersion}, mas a sala já está na versão {currentVersion}.")
+        {
+            RequestedVersion = requestedVersion;
+            CurrentVersion = currentVersion;
+        }
+
+        public int RequestedVersion { get; }
+        public int CurrentVersion { get; }
     }
 
     /// <summary>

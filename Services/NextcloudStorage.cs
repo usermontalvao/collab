@@ -93,7 +93,7 @@ namespace Jurius.CollabEditing.Services
             using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogError("Falha ao baixar {Path} do Nextcloud: {Status}", relativePath, response.StatusCode);
+                _logger.LogError("Falha ao baixar {Path} do Nextcloud: {Status}", Describe(relativePath), response.StatusCode);
                 throw new HttpRequestException($"Nextcloud retornou {(int)response.StatusCode} ao baixar o arquivo.");
             }
 
@@ -119,11 +119,26 @@ namespace Jurius.CollabEditing.Services
             using var response = await _http.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogError("Falha ao gravar {Path} no Nextcloud: {Status}", relativePath, response.StatusCode);
+                _logger.LogError("Falha ao gravar {Path} no Nextcloud: {Status}", Describe(relativePath), response.StatusCode);
                 throw new HttpRequestException($"Nextcloud retornou {(int)response.StatusCode} ao gravar o arquivo.");
             }
 
-            _logger.LogInformation("Documento gravado no Nextcloud: {Path}", relativePath);
+            _logger.LogInformation("Documento gravado no Nextcloud ({Path}).", Describe(relativePath));
+        }
+
+        /// <summary>
+        /// O caminho NÃO vai para o log: ele carrega nome de cliente e de processo.
+        /// O que ajuda a investigar é a extensão e o tamanho — o resto identifica a
+        /// pasta pela mesma impressão digital sem revelar de quem é.
+        /// </summary>
+        private static string Describe(string relativePath)
+        {
+            if (string.IsNullOrWhiteSpace(relativePath)) return "—";
+
+            var extension = Path.GetExtension(relativePath);
+            var fingerprint = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(relativePath)))[..8];
+            return $"{fingerprint}{extension}";
         }
     }
 }

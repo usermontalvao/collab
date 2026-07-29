@@ -216,15 +216,58 @@ namespace Jurius.CollabEditing.Controllers
                 return BadRequest("roomName é obrigatório.");
             }
 
+            // O editor novo manda o documento inteiro e a versão que ele já
+            // incorporou. Sem esses campos (front antigo ainda no ar durante a
+            // implantação) a gravação segue pela reaplicação da fila no servidor —
+            // mais frágil, mas honesta: se falhar, responde erro em vez de "Salvo".
+            DocumentSaveSnapshot snapshot = null;
+            if (!string.IsNullOrWhiteSpace(param.sfdt) && param.version.HasValue)
+            {
+                snapshot = new DocumentSaveSnapshot
+                {
+                    Sfdt = param.sfdt,
+                    Version = param.version.Value,
+                };
+            }
+
             try
             {
                 SaveOutcome outcome = await _persistence.PersistAsync(
-                    param.roomName, param.filePath, finalize: false, HttpContext.RequestAborted);
+                    param.roomName,
+                    param.filePath,
+                    finalize: false,
+                    snapshot: snapshot,
+                    cancellationToken: HttpContext.RequestAborted);
 
                 _activity.Record("gravação pedida pelo editor", param.roomName, null,
                     $"{outcome.Operations} operações");
 
                 return Ok(outcome);
+            }
+            catch (RoomVersionConflictException ex)
+            {
+                _logger.LogInformation(
+                    "Sala {Room}: snapshot de gravação na versão {Requested}, sala na {Current}.",
+                    param.roomName, ex.RequestedVersion, ex.CurrentVersion);
+                return StatusCode(
+                    StatusCodes.Status409Conflict,
+                    "Chegaram novas edições enquanto o documento era preparado. Sincronize e salve novamente.");
+            }
+            catch (UnmaterializedSnapshotException ex)
+            {
+                // O documento chegou com edições ainda penduradas: convertê-lo
+                // gravaria o texto anterior. A fila fica intacta.
+                _logger.LogError(ex, "Sala {Room}: documento recebido sem as edições aplicadas.", param.roomName);
+                return StatusCode(
+                    StatusCodes.Status422UnprocessableEntity,
+                    "O documento chegou sem as edições aplicadas e não foi gravado. Reabra o documento e salve de novo.");
+            }
+            catch (OperationReplayException ex)
+            {
+                _logger.LogError(ex, "Sala {Room}: falha ao reaplicar a fila de operações.", param.roomName);
+                return StatusCode(
+                    StatusCodes.Status500InternalServerError,
+                    "Não foi possível montar o documento para gravar. Nada foi perdido: as edições continuam na sala.");
             }
             catch (TimeoutException ex)
             {

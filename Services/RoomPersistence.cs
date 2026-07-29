@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.SignalR;
 using Newtonsoft.Json;
 using StackExchange.Redis;
 using Syncfusion.EJ2.DocumentEditor;
+using System.Security.Cryptography;
 
 namespace Jurius.CollabEditing.Services
 {
@@ -25,7 +26,12 @@ namespace Jurius.CollabEditing.Services
     /// </summary>
     public interface IRoomPersistence
     {
-        Task<SaveOutcome> PersistAsync(string roomName, string sourcePath, bool finalize, CancellationToken cancellationToken = default);
+        Task<SaveOutcome> PersistAsync(
+            string roomName,
+            string sourcePath,
+            bool finalize,
+            DocumentSaveSnapshot snapshot = null,
+            CancellationToken cancellationToken = default);
     }
 
     public class RoomPersistence : IRoomPersistence
@@ -34,6 +40,13 @@ namespace Jurius.CollabEditing.Services
         private static readonly TimeSpan LockTtl = TimeSpan.FromMinutes(3);
         private static readonly TimeSpan LockWait = TimeSpan.FromSeconds(90);
         private static readonly TimeSpan LockPoll = TimeSpan.FromMilliseconds(120);
+
+        /// <summary>
+        /// Prazo dado às operações de uma sala cuja gravação final falhou. Longo de
+        /// propósito: é tempo de sobra para alguém reabrir o documento e para o
+        /// serviço ser consertado, sem deixar a chave para sempre.
+        /// </summary>
+        private static readonly TimeSpan UnsavedRoomTtl = TimeSpan.FromDays(30);
 
         private readonly IConnectionMultiplexer _redis;
         private readonly INextcloudStorage _storage;
@@ -59,6 +72,7 @@ namespace Jurius.CollabEditing.Services
             string roomName,
             string sourcePath,
             bool finalize,
+            DocumentSaveSnapshot documentSnapshot = null,
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(roomName)) throw new ArgumentException("Sala não informada.", nameof(roomName));
@@ -77,7 +91,8 @@ namespace Jurius.CollabEditing.Services
 
             try
             {
-                return await PersistInternalAsync(database, roomName, sourcePath, finalize, cancellationToken);
+                return await PersistInternalAsync(
+                    database, roomName, sourcePath, finalize, documentSnapshot, cancellationToken);
             }
             finally
             {
@@ -93,6 +108,7 @@ namespace Jurius.CollabEditing.Services
             string roomName,
             string sourcePath,
             bool finalize,
+            DocumentSaveSnapshot documentSnapshot,
             CancellationToken cancellationToken)
         {
             if (string.IsNullOrWhiteSpace(sourcePath))
@@ -123,6 +139,11 @@ namespace Jurius.CollabEditing.Services
             actions.AddRange(processing);
             actions.AddRange(pending);
 
+            if (documentSnapshot != null && documentSnapshot.Version != version)
+            {
+                throw new RoomVersionConflictException(documentSnapshot.Version, version);
+            }
+
             var outcome = new SaveOutcome
             {
                 Operations = actions.Count,
@@ -148,9 +169,40 @@ namespace Jurius.CollabEditing.Services
                 throw new InvalidOperationException("A sala não tem arquivo de origem registrado.");
             }
 
-            // 2) Aplica no .docx e devolve ao Nextcloud.
-            await ApplyAndUploadAsync(roomName, sourcePath, actions, cancellationToken);
+            // 2) O botão Salvar manda o documento COMPLETO já montado no navegador.
+            // É a única cópia que existe com todas as operações da sala aplicadas e
+            // resolvidas (o navegador é o dono da resolução de conflitos).
+            //
+            // Gravações de background não têm navegador: elas reaplicam a fila no
+            // arquivo, e agora pela API que realmente altera o documento — ver
+            // DocumentReplay.
+            try
+            {
+                if (documentSnapshot != null)
+                {
+                    await UploadSnapshotAsync(
+                        roomName, sourcePath, documentSnapshot.Sfdt, cancellationToken);
+                }
+                else
+                {
+                    await ApplyAndUploadAsync(roomName, sourcePath, actions, cancellationToken);
+                }
+            }
+            catch (Exception)
+            {
+                // A gravação final é a última chance de escrever o arquivo. Falhando
+                // aqui, as operações NÃO podem ser apagadas junto com a sala: elas
+                // ficam no Redis (com prazo, para a memória não crescer sem fim) e
+                // quem reabrir o documento recebe o texto por elas.
+                if (finalize) await PreserveRoomAsync(database, roomName);
+                throw;
+            }
+
+            // Chegar aqui significa que o arquivo foi enviado E RELIDO do Nextcloud
+            // com o mesmo conteúdo — ver UploadAndVerifyAsync. É o único lugar em
+            // que a tela ganha o direito de dizer "Salvo".
             outcome.Uploaded = true;
+            outcome.Verified = true;
 
             // 3) Remove das filas exatamente o que foi aplicado.
             if (finalize)
@@ -227,31 +279,137 @@ namespace Jurius.CollabEditing.Services
             using Stream source = await _storage.DownloadAsync(sourcePath, cancellationToken);
             WordDocument document = WordDocument.Load(source, FormatType.Docx);
 
-            // As operações armazenadas pelo UpdateAction já chegam transformadas e
-            // versionadas. Aplicá-las uma a uma por um novo
-            // CollaborativeEditingHandler fazia o Syncfusion tentar transformar
-            // novamente certos formatos complexos (listas, tabelas e revisões) e
-            // disparava NullReferenceException. ImportFile já usa UpdateActions
-            // para montar exatamente o mesmo snapshot ao reabrir o documento; a
-            // persistência precisa seguir a mesma rota suportada.
-            //
-            // Não descarte entradas inválidas silenciosamente: perder uma operação
-            // seria pior do que recusar a gravação e manter toda a fila no Redis.
-            if (actions.Any(action => action == null))
+            string sfdt;
+            try
             {
-                throw new InvalidDataException("A fila da sala contém uma operação inválida.");
+                // NÃO use WordDocument.UpdateActions aqui: ela só PENDURA as
+                // operações no SFDT para o navegador aplicar, e o DocIO as ignora
+                // ao gravar o .docx — o arquivo subia com o texto antigo. Ver
+                // DocumentReplay, que aplica pela API que altera o documento.
+                sfdt = DocumentReplay.ReplayToSfdt(document, actions);
+            }
+            finally
+            {
+                document.Dispose();
             }
 
-            document.UpdateActions(actions);
+            await UploadSfdtAsync(sourcePath, sfdt, cancellationToken);
+            _logger.LogInformation(
+                "Sala {Room}: {Count} operações reaplicadas e documento enviado ao Nextcloud.",
+                roomName, actions.Count);
+        }
+
+        private async Task UploadSnapshotAsync(
+            string roomName,
+            string sourcePath,
+            string sfdt,
+            CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(sfdt))
+            {
+                throw new InvalidDataException("O snapshot do editor está vazio.");
+            }
+
+            await UploadSfdtAsync(sourcePath, sfdt, cancellationToken);
+            _logger.LogInformation(
+                "Sala {Room}: documento do editor enviado e relido do Nextcloud.",
+                roomName);
+        }
+
+        /// <summary>
+        /// Converte o SFDT em .docx e grava, mas só depois de conferir que ele NÃO
+        /// tem operações penduradas — um SFDT nessas condições vira um .docx com o
+        /// texto anterior, e foi assim que "Salvo" passou a mentir.
+        /// </summary>
+        private async Task UploadSfdtAsync(
+            string sourcePath,
+            string sfdt,
+            CancellationToken cancellationToken)
+        {
+            DocumentReplay.EnsureMaterialized(sfdt);
 
             using var stream = new MemoryStream();
-            Syncfusion.DocIO.DLS.WordDocument doc = WordDocument.Save(JsonConvert.SerializeObject(document));
-            doc.Save(stream, Syncfusion.DocIO.FormatType.Docx);
-            doc.Dispose();
-            document.Dispose();
+            Syncfusion.DocIO.DLS.WordDocument docx = WordDocument.Save(sfdt);
+            try
+            {
+                docx.Save(stream, Syncfusion.DocIO.FormatType.Docx);
+            }
+            finally
+            {
+                docx.Dispose();
+            }
 
-            await _storage.UploadAsync(sourcePath, stream, cancellationToken);
-            _logger.LogInformation("Sala {Room}: documento enviado ao Nextcloud.", roomName);
+            await UploadAndVerifyAsync(sourcePath, stream, cancellationToken);
+        }
+
+        /// <summary>
+        /// Um PUT 2xx só confirma que o WebDAV aceitou a requisição. Para a tela
+        /// poder dizer "Salvo", relê o mesmo caminho e compara os bytes do DOCX.
+        /// </summary>
+        private async Task UploadAndVerifyAsync(
+            string sourcePath,
+            MemoryStream content,
+            CancellationToken cancellationToken)
+        {
+            byte[] expected = content.ToArray();
+            await _storage.UploadAsync(
+                sourcePath, new MemoryStream(expected, writable: false), cancellationToken);
+
+            for (var attempt = 1; attempt <= 3; attempt++)
+            {
+                using Stream downloaded = await _storage.DownloadAsync(sourcePath, cancellationToken);
+                using var buffer = new MemoryStream();
+                await downloaded.CopyToAsync(buffer, cancellationToken);
+
+                if (CryptographicOperations.FixedTimeEquals(
+                    SHA256.HashData(expected), SHA256.HashData(buffer.ToArray())))
+                {
+                    return;
+                }
+
+                if (attempt < 3)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(150 * attempt), cancellationToken);
+                }
+            }
+
+            throw new IOException(
+                "O Nextcloud aceitou a gravação, mas a releitura não corresponde ao DOCX enviado.");
+        }
+
+        /// <summary>
+        /// A gravação final falhou e a sala já está vazia: as operações continuam
+        /// sendo a ÚNICA cópia do que foi digitado. Elas ficam onde estão, só com
+        /// prazo de validade — apagar agora perderia o trabalho, e deixar para
+        /// sempre encheria o Redis de salas mortas. Dentro do prazo, reabrir o
+        /// documento reconstrói o texto pela fila (ImportFile).
+        /// </summary>
+        private async Task PreserveRoomAsync(IDatabase database, string roomName)
+        {
+            try
+            {
+                foreach (var suffix in new[]
+                {
+                    string.Empty,
+                    CollaborativeEditingHelper.ActionsToRemoveSuffix,
+                    CollaborativeEditingHelper.OperationOffsetSuffix,
+                    CollaborativeEditingHelper.VersionInfoSuffix,
+                    CollaborativeEditingHelper.SourceInfoSuffix,
+                })
+                {
+                    await database.KeyExpireAsync(roomName + suffix, UnsavedRoomTtl);
+                }
+
+                _logger.LogWarning(
+                    "Sala {Room}: gravação final falhou; as operações foram mantidas por {Days} dias.",
+                    roomName, UnsavedRoomTtl.TotalDays);
+            }
+            catch (Exception ex)
+            {
+                // Não conseguir marcar o prazo é melhor do que apagar: as chaves
+                // continuam lá, com as edições intactas.
+                _logger.LogError(ex, "Sala {Room}: não foi possível marcar o prazo das operações.", roomName);
+            }
         }
 
         private static async Task ClearRoomAsync(IDatabase database, string roomName)

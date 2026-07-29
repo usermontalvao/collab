@@ -48,7 +48,8 @@ namespace Jurius.CollabEditing.Services
                     // escopo (AddHttpClient) e este serviço é singleton.
                     using var scope = _scopeFactory.CreateScope();
                     var persistence = scope.ServiceProvider.GetRequiredService<IRoomPersistence>();
-                    await persistence.PersistAsync(workItem.RoomName, workItem.SourcePath, workItem.Finalize, stoppingToken);
+                    await persistence.PersistAsync(
+                        workItem.RoomName, workItem.SourcePath, workItem.Finalize, null, stoppingToken);
                 }
                 catch (Exception ex)
                 {

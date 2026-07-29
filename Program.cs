@@ -4,6 +4,13 @@ using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// O botão Salvar envia o SFDT completo que está visível no editor. Documentos
+// com imagens podem ultrapassar o limite padrão de 30 MB do Kestrel.
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.Limits.MaxRequestBodySize = 96 * 1024 * 1024;
+});
+
 // Licença do Syncfusion (mesma chave do servidor de documentos).
 var licenseKey = builder.Configuration["Syncfusion:LicenseKey"];
 if (!string.IsNullOrWhiteSpace(licenseKey))

@@ -65,7 +65,22 @@ public class CoedicaoTests
 
     private static async Task<SaveOutcome> Salvar(HttpClient client, string sala)
     {
-        var response = await client.PostAsJsonAsync("/api/CollaborativeEditing/SaveToSource", new { roomName = sala });
+        var snapshotResponse = await client.PostAsJsonAsync("/api/CollaborativeEditing/ImportFile", new
+        {
+            roomName = sala,
+            filePath = CaminhoDocumento,
+            fileName = "peticao.docx",
+        });
+        snapshotResponse.EnsureSuccessStatusCode();
+        var snapshot = JsonConvert.DeserializeObject<DocumentContent>(
+            await snapshotResponse.Content.ReadAsStringAsync());
+
+        var response = await client.PostAsJsonAsync("/api/CollaborativeEditing/SaveToSource", new
+        {
+            roomName = sala,
+            sfdt = snapshot.sfdt,
+            version = snapshot.version,
+        });
         response.EnsureSuccessStatusCode();
         return JsonConvert.DeserializeObject<SaveOutcome>(await response.Content.ReadAsStringAsync());
     }
@@ -278,6 +293,85 @@ public class CoedicaoTests
 
         var texto = DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento));
         Assert.Contains("OlaZZ", texto);
+    }
+
+    [SkippableFact(DisplayName = "Salvar recusa snapshot defasado e preserva as operações")]
+    public async Task SalvarRecusaSnapshotDefasado()
+    {
+        using var servico = NovoServico();
+        var client = servico.CreateClient();
+        const string sala = "sala_snapshot_defasado";
+
+        var versao = await AbrirDocumento(client, sala);
+        var primeira = await EnviarOperacao(
+            client, DocumentFactory.Insert(sala, "conexao-da-ana", versao, "A", offset: 4));
+
+        var snapshotResponse = await client.PostAsJsonAsync("/api/CollaborativeEditing/ImportFile", new
+        {
+            roomName = sala,
+            filePath = CaminhoDocumento,
+            fileName = "peticao.docx",
+        });
+        snapshotResponse.EnsureSuccessStatusCode();
+        var snapshotAntigo = JsonConvert.DeserializeObject<DocumentContent>(
+            await snapshotResponse.Content.ReadAsStringAsync());
+
+        await EnviarOperacao(
+            client, DocumentFactory.Insert(sala, "conexao-da-ana", primeira.Version, "B", offset: 5));
+
+        var response = await client.PostAsJsonAsync("/api/CollaborativeEditing/SaveToSource", new
+        {
+            roomName = sala,
+            sfdt = snapshotAntigo.sfdt,
+            version = snapshotAntigo.version,
+        });
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(0, servico.Storage.UploadCount);
+
+        var resultado = await Salvar(client, sala);
+        Assert.True(resultado.Uploaded);
+        Assert.Contains("OlaAB", DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento)));
+    }
+
+    [SkippableFact(DisplayName = "Salvar só confirma depois de reler o mesmo DOCX no Nextcloud")]
+    public async Task SalvarDetectaPutQueNaoSubstituiuOArquivo()
+    {
+        using var servico = NovoServico();
+        var client = servico.CreateClient();
+        const string sala = "sala_put_falso";
+
+        var versao = await AbrirDocumento(client, sala);
+        await EnviarOperacao(
+            client, DocumentFactory.Insert(sala, "conexao-da-ana", versao, "ZZ", offset: 4));
+
+        servico.Storage.IgnoreUploads = true;
+        var snapshotResponse = await client.PostAsJsonAsync("/api/CollaborativeEditing/ImportFile", new
+        {
+            roomName = sala,
+            filePath = CaminhoDocumento,
+            fileName = "peticao.docx",
+        });
+        snapshotResponse.EnsureSuccessStatusCode();
+        var snapshot = JsonConvert.DeserializeObject<DocumentContent>(
+            await snapshotResponse.Content.ReadAsStringAsync());
+
+        var failed = await client.PostAsJsonAsync("/api/CollaborativeEditing/SaveToSource", new
+        {
+            roomName = sala,
+            sfdt = snapshot.sfdt,
+            version = snapshot.version,
+        });
+
+        Assert.Equal(HttpStatusCode.InternalServerError, failed.StatusCode);
+        Assert.DoesNotContain("OlaZZ", DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento)));
+
+        // A fila só é aparada depois da verificação. Corrigido o armazenamento,
+        // a mesma edição continua disponível e pode ser gravada de verdade.
+        servico.Storage.IgnoreUploads = false;
+        var resultado = await Salvar(client, sala);
+        Assert.True(resultado.Uploaded);
+        Assert.Contains("OlaZZ", DocumentFactory.TextOf(servico.Storage.Read(CaminhoDocumento)));
     }
 
     [SkippableFact(DisplayName = "Salvar avisa a sala inteira — quem não clicou também vê \"Salvo\"")]

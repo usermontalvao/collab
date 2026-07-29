@@ -226,23 +226,26 @@ namespace Jurius.CollabEditing.Services
         {
             using Stream source = await _storage.DownloadAsync(sourcePath, cancellationToken);
             WordDocument document = WordDocument.Load(source, FormatType.Docx);
-            var handler = new CollaborativeEditingHandler(document);
 
-            foreach (ActionInfo info in actions)
+            // As operações armazenadas pelo UpdateAction já chegam transformadas e
+            // versionadas. Aplicá-las uma a uma por um novo
+            // CollaborativeEditingHandler fazia o Syncfusion tentar transformar
+            // novamente certos formatos complexos (listas, tabelas e revisões) e
+            // disparava NullReferenceException. ImportFile já usa UpdateActions
+            // para montar exatamente o mesmo snapshot ao reabrir o documento; a
+            // persistência precisa seguir a mesma rota suportada.
+            //
+            // Não descarte entradas inválidas silenciosamente: perder uma operação
+            // seria pior do que recusar a gravação e manter toda a fila no Redis.
+            if (actions.Any(action => action == null))
             {
-                if (!info.IsTransformed)
-                {
-                    CollaborativeEditingHandler.TransformOperation(info, actions);
-                }
+                throw new InvalidDataException("A fila da sala contém uma operação inválida.");
             }
 
-            foreach (ActionInfo info in actions)
-            {
-                handler.UpdateAction(info);
-            }
+            document.UpdateActions(actions);
 
             using var stream = new MemoryStream();
-            Syncfusion.DocIO.DLS.WordDocument doc = WordDocument.Save(JsonConvert.SerializeObject(handler.Document));
+            Syncfusion.DocIO.DLS.WordDocument doc = WordDocument.Save(JsonConvert.SerializeObject(document));
             doc.Save(stream, Syncfusion.DocIO.FormatType.Docx);
             doc.Dispose();
             document.Dispose();
